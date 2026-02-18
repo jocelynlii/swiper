@@ -20,6 +20,7 @@ def plot_device_schedule_trace(
             'Y_MEAS': 'gold',
             'IDLE': 'white',
             'DECODE_IDLE': 'firebrick',
+            'MARKER': ''
         },
         edgecolor_dict: dict[str, str] = {
             'MERGE': 'dimgray',
