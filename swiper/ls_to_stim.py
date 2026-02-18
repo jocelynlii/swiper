@@ -628,24 +628,34 @@ class LatticeSurgeryToStim:
         if self.temporal_round == 0:
             for q in m_qubits:
                 look_back_idx = self.measurement_idx_map[(q.stim_idx, self.temporal_round)]-len(self.measurement_idx_map)
-                print(look_back_idx)
                 circuit.append("DETECTOR", 
                               [stim.target_rec(look_back_idx)], 
                               [q.patch[0], q.patch[1], curr_temporal_round]) # self.temporal_round
         else:
             for q in m_qubits:
                 look_back_idx1 = self.measurement_idx_map[(q.stim_idx, self.temporal_round)]-len(self.measurement_idx_map)
-                look_back_idx2 = self.measurement_idx_map[(q.stim_idx, self.temporal_round-1)]-len(self.measurement_idx_map)
-                circuit.append("DETECTOR", 
-                              [stim.target_rec(look_back_idx1), stim.target_rec(look_back_idx2)], 
-                              [q.patch[0], q.patch[1], curr_temporal_round]) # self.temporal_round
+
+                if (q.stim_idx, self.temporal_round-1) in self.measurement_idx_map:
+                    look_back_idx2 = self.measurement_idx_map[(q.stim_idx, self.temporal_round-1)]-len(self.measurement_idx_map)
+                    circuit.append("DETECTOR", 
+                                [stim.target_rec(look_back_idx1), stim.target_rec(look_back_idx2)], 
+                                [q.patch[0], q.patch[1], curr_temporal_round]) # self.temporal_round
+                else:
+                    circuit.append("DETECTOR", 
+                            [stim.target_rec(look_back_idx1)], 
+                            [q.patch[0], q.patch[1], curr_temporal_round]) # self.temporal_round
                 
             for q in mx_qubits:
                 look_back_idx1 = self.measurement_idx_map[(q.stim_idx, self.temporal_round)]-len(self.measurement_idx_map)
-                look_back_idx2 = self.measurement_idx_map[(q.stim_idx, self.temporal_round-1)]-len(self.measurement_idx_map)
-                circuit.append("DETECTOR", 
-                              [stim.target_rec(look_back_idx1), stim.target_rec(look_back_idx2)], 
-                              [q.patch[0], q.patch[1], curr_temporal_round]) # self.temporal_round
+                if (q.stim_idx, self.temporal_round-1) in self.measurement_idx_map:
+                    look_back_idx2 = self.measurement_idx_map[(q.stim_idx, self.temporal_round-1)]-len(self.measurement_idx_map)
+                    circuit.append("DETECTOR", 
+                                [stim.target_rec(look_back_idx1), stim.target_rec(look_back_idx2)], 
+                                [q.patch[0], q.patch[1], curr_temporal_round]) # self.temporal_round
+                else:
+                    circuit.append("DETECTOR", 
+                            [stim.target_rec(look_back_idx1)], 
+                            [q.patch[0], q.patch[1], curr_temporal_round]) # self.temporal_round
 
         circuit.append("TICK")
 
@@ -686,6 +696,8 @@ class LatticeSurgeryToStim:
                                     self.measurement_idx_map[k] = v - 1
 
             self.temporal_round += repeat_rounds
+        else:
+            self.temporal_round += 1
         
 
 
@@ -709,6 +721,48 @@ class LatticeSurgeryToStim:
 
         # done with round 1 - increment temporal round
         self.temporal_round += 1
+
+    def reset_data_qubits_MR(self, patch: tuple[int, int]):
+        # first initialize all data qubits and reset them using R
+        p1, p2 = patch
+
+        # create the midpoint data qubit
+        midpoint = (0, 0)
+        if self.d % 2 == 1:
+            midpoint = (self.d + p1*(2*(self.d+1)), self.d + p2*(2*(self.d+1)))
+        else:
+            midpoint = ((self.d+1) + p1*(2*(self.d+1)), (self.d-1) + p2*(2*(self.d+1)))
+        m1, m2 = midpoint
+
+        # also need to reset/initialize the bridge qubits too?
+        rx_qubits = [] # init to |+>
+        r_qubits = [] # init to |0>
+        midpoint_stim_idx = 0
+        for pq in self.logical_patch_2_physical_qubits[patch]:
+            if (pq.qubit_type == "Data" and not pq.initialized):
+                pq1, pq2 = pq.patch
+                if (pq1 <= m1 and pq2 > m2) or (pq1 >= m1 and pq2 < m2):
+                    rx_qubits.append(pq.stim_idx)
+                elif (pq1 < m1 and pq2 <= m2) or (pq1 > m1 and pq2 >= m2):
+                    r_qubits.append(pq.stim_idx)
+                elif pq1 == m1 and pq2 == m2: # precisely the middle qubit, initialize to S state
+                    rx_qubits.append(pq.stim_idx) # to apply the S-gate, need to first RX (reset to |+>), then apply S gate on this qubit
+                    midpoint_stim_idx = pq.stim_idx
+                pq.initialized = True
+
+        # all_data_qubits = [q.stim_idx for q in self.physical_qubits if (q.qubit_type == "Data" and not q.initialized)]
+        self.c.append("R", r_qubits)
+        self.c.append("RX", rx_qubits)
+        self.c.append("TICK")
+        # self.c.append("S", [midpoint_stim_idx]) # apply S gate to the middle qubit
+
+        # # append TICK after reset data qubits
+        # self.c.append("TICK") 
+
+        return midpoint_stim_idx
+
+        # then initialize all ancilla qubits
+        # self.c += self.reset_ancillas()
 
     def ls_to_stim_fcn(self):
         # first handle initial round
@@ -750,7 +804,7 @@ class LatticeSurgeryToStim:
                     self.c += self.reset_ancillas()
                     self.c += self.steady_state_CX()
                     self.c += self.measure_and_detectors(repeat=False) # TODO: here the Z ancillas are first measured, but pretty sure this depends on the type of surface code
-                    self.temporal_round += 1 # implement temporal round by 1 because here we just finished our first round
+                    # self.temporal_round += 1 # implement temporal round by 1 because here we just finished our first round
 
                     # now begin to implement the REPEAT rounds
                     num_idle_rounds = inst.instruction.duration # TODO: need to handle case where this is not an int and instead is some Duration object
@@ -770,7 +824,7 @@ class LatticeSurgeryToStim:
                     body += self.measure_and_detectors(repeat=True, repeat_rounds=num_idle_rounds)
                     self.c.append(stim.CircuitRepeatBlock(repeat_count=num_idle_rounds, body=body))
                     self.c.append("SHIFT_COORDS", [], [0, 0, -1*(num_idle_rounds)]) # need to reset our shift here!
-            elif inst.instruction_name == "INJECT_T":
+            elif inst.instruction.name == "INJECT_T":
                 # instead of injecting a T state on a logical qubit patch, inject an S state due to stim requiring clifford gates
                 # magic state injection based on https://dl.acm.org/doi/pdf/10.1145/3528416.3530237
 
@@ -781,16 +835,40 @@ class LatticeSurgeryToStim:
                     
                     # now initialize this patch's physical qubits (data and ancilla), as according to the MR approach
                     # first initialize this patch's physical qubits
+                    # creates all data and ancilla qubits in this new patch
                     self.logical_qubit_2_physical_qubits(patch) # create the physical qubits for this specific logical qubit patch, update bookkeeping struct
+                    # create bridge qubits if necessary (new adjacent patch created)
                     bridge_logical_patches = self.add_bridge_qubits(patch) # if adding this logical patch creates 2 adjacent logical patches, then we need to create the bridge qubits btwn them
 
                     # add the new physical qubits that we initialized to stim - pass in the logical patches/logical bridge patches that correspond to these new physical qubits into the fcn
+                    # create the stim QUBIT_COORDS for the new qubits
                     self.initialize_given_stim_qubits([patch], bridge_logical_patches) 
 
                     # now we need to reset these qubits, but specifically in terms of the MR approach
                     # first initialize all data qubits according to the MR approach
+                    midpoint_stim_idx = self.reset_data_qubits_MR(patch)
 
                     # then ancillas are reset as normal (in the MR approach, doesn't change how ancillas are prepared)
+                    # this includes the new ancillas that were just created
+                    self.reset_ancillas()
+
+                    self.c.append("S", [midpoint_stim_idx]) # TODO: can either do this S before or after the reset ancillas
+                    self.c.append("TICK") 
+
+                    # now we need 2 rounds of stabilizer measurements to be able to compare the results of all the stabilizers, to ensure that everything is correct
+                    # first round
+                    self.c += self.steady_state_CX()
+                    self.c += self.measure_and_detectors(repeat=False)
+                    # self.temporal_round += 1
+
+                    # second round
+                    self.c += self.reset_ancillas()
+                    self.c += self.steady_state_CX()
+                    self.c += self.measure_and_detectors(repeat=False)
+
+                    # self.temporal_round += 1
+
+                    # TODO: should I include post-selection? this would be based on the detectors and essentially throw out the t-gate if the detectors find everything is wrong
 
 
 def main():
