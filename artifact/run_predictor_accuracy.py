@@ -9,29 +9,35 @@ import pickle as pkl
 from swiper.predictor import simulate_temporal_speculation, process_failures
 
 if __name__ == '__main__':
-    d_range = [13, 15, 17, 19, 21, 23, 25, 27, 29, 31]
-    p_range = [1e-3]
+    # d_range = [13, 15, 17, 19, 21, 23, 25, 27, 29, 31] # iterate through various code distances
+    # d_range = [13] # iterate through various code distances
+    d_range = [3]
+    p_range = [1e-3] # iterate through various probabilities for random errors occuring (noise)
 
     print(f"Running predictor accuracy simulation for d in {d_range} and p = {p_range}")
-    for i, config in enumerate([[2,3], [3], []]):
+    for i, config in enumerate([[2,3]]): # for i, config in enumerate([[2,3], [3], []]): # [2,3] = ignore steps 2&3 = 1-step predictor. [3]=ignore step 3=2-step predictor. []=ignore nothing=3-step predictor
         print(f'Running {i+1}-Step Predictor...')
         results = {}
-        for p in p_range:
+        for p in p_range: # various probabilities for random errors occuring (physical error rate probabilities)
             print(f'Running p = {p}... ', end='', flush=True)
-            for d in d_range:
+            for d in d_range: # loop through code distances
                 print(f'd={d}, ', end='', flush=True)
+                # 5_000 = 
                 results[(p,d)] = simulate_temporal_speculation(5_000, d, p, ignore_steps=config)
+                # print(results)
             print()
-        pkl.dump(results, open(f'artifact/data/0{i+1}-step-predictor-results.pkl', 'wb'))
+        pkl.dump(results, open(f'artifact/data/0{i+1}-step-predictor-results.pkl', 'wb')) # dump pickle results into file
 
+    # get different datas from the pkl file
     one_step_data = pkl.load(open('artifact/data/01-step-predictor-results.pkl', 'rb'))
     two_step_data = pkl.load(open('artifact/data/02-step-predictor-results.pkl', 'rb'))    
     three_step_data = pkl.load(open('artifact/data/03-step-predictor-results.pkl', 'rb'))
 
-    for i, results in enumerate([one_step_data, two_step_data, three_step_data]):
-        processed_results = {}
-        for p in p_range:
-            for d in d_range:
-                false_neg, false_pos, both = process_failures(results[(p,d)][2], d=d)
-                processed_results[(p,d)] = (results[(p,d)][0], results[(p,d)][1], (false_neg, false_pos, both))
-        pkl.dump(processed_results, open(f'artifact/data/processed_0{i+1}-step-predictor-results.pkl', 'wb'))
+    # 
+    # for i, results in enumerate([one_step_data, two_step_data, three_step_data]):
+    #     processed_results = {}
+    #     for p in p_range:
+    #         for d in d_range:
+    #             false_neg, false_pos, both = process_failures(results[(p,d)][2], d=d)
+    #             processed_results[(p,d)] = (results[(p,d)][0], results[(p,d)][1], (false_neg, false_pos, both))
+    #     pkl.dump(processed_results, open(f'artifact/data/processed_0{i+1}-step-predictor-results.pkl', 'wb'))

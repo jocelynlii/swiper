@@ -59,14 +59,14 @@ def main():
 
     # Generate all plots
     print('\nRUNNING ANALYSIS\n')
-    plot_3(decoder_dist_filename)
-    plot_4(one_step_data_filename, two_step_data_filename, three_step_data_filename)
-    plot_7(fpga_data_filename)
-    plot_8b(mispredict_data_filename)
-    plot_9()
+    # plot_3(decoder_dist_filename)
+    # plot_4(one_step_data_filename, two_step_data_filename, three_step_data_filename)
+    # plot_7(fpga_data_filename)
+    # plot_8b(mispredict_data_filename)
+    # plot_9()
     plot_10_14abc_15ab(benchmark_directories, benchmark_runtime_directories)
-    plot_12ab(reaction_times_directory, decoder_dist_filename)
-    plot_11ab_12c()
+    # plot_12ab(reaction_times_directory, decoder_dist_filename)
+    # plot_11ab_12c()
 
 def plot_3(decoder_dist_filename):
     """See `notebooks/03_decoder_distribution.ipynb` for original plotting
@@ -714,7 +714,7 @@ def plot_10_14abc_15ab(benchmark_directories, benchmark_runtime_directories):
         group_by='speculation_mode',
         group_by_2='scheduling_method',
         filter_dict={'distance': d},
-        compare_filter_dict={'speculation_accuracy': 1.0},
+        compare_filter_dict={'speculation_accuracy': 0.75},
         sorted_benchmarks=sorted_benchmarks,
         x_offsets_after={
             'rz_1e-10':2.0,
@@ -729,7 +729,7 @@ def plot_10_14abc_15ab(benchmark_directories, benchmark_runtime_directories):
     ax[0].tick_params(direction='in', which='both')
     ax[0].set_yscale('log')
     plt.setp(ax[0].get_yticklabels(), fontsize=9)
-    plt.savefig('artifact/figures/14_a.png', bbox_inches='tight')
+    plt.savefig('artifact/figures/14_a1.png', bbox_inches='tight')
     plt.close()
 
     def geo_mean(iterable):
@@ -857,7 +857,7 @@ def plot_10_14abc_15ab(benchmark_directories, benchmark_runtime_directories):
     order = [1,0,4,2,3]
     ax[1].legend([handles[idx] for idx in order],[labels[idx] for idx in order], loc='upper center', bbox_to_anchor=(0.5, -0.4), fontsize=10, frameon=False, ncol=2)
 
-    plt.savefig('artifact/figures/14_b.png', bbox_inches='tight')
+    plt.savefig('artifact/figures/14_b1.png', bbox_inches='tight')
     plt.close()
 
     benchmark_info['t merge ratio'] = benchmark_info['T volume'] / benchmark_info['Merge volume']
@@ -980,7 +980,7 @@ def plot_10_14abc_15ab(benchmark_directories, benchmark_runtime_directories):
     ax.set_ylabel('SWIPER max. proc.')
     ax.legend(loc='upper left', bbox_to_anchor=(1.0, 1.05), fontsize=10, frameon=False)
     ax.tick_params(direction='in', which='both')
-    plt.savefig('artifact/figures/15_a.png', bbox_inches='tight')
+    plt.savefig('artifact/figures/15_a1.png', bbox_inches='tight')
     plt.close()
 
     print('Generating figure 15b\n')
@@ -1015,7 +1015,7 @@ def plot_10_14abc_15ab(benchmark_directories, benchmark_runtime_directories):
     plt.xlabel('Wasted decode fraction')
     plt.yticks([])
     plt.grid(axis='y', linestyle=':', alpha=0.5, zorder=-10)
-    plt.savefig('artifact/figures/15_b.png', bbox_inches='tight')
+    plt.savefig('artifact/figures/15_b1.png', bbox_inches='tight')
     plt.close()
 
 def plot_12ab(reaction_times_directory, decoder_dist_filename):
