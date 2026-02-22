@@ -36,6 +36,7 @@ class LatticeSurgeryToStim:
         seen_patches = []
         unique_counter = 0 # for labels
         bg_time = 0
+        patch_last_idx = {}
 
         for i, inst in enumerate(self.schedule):
             # get the logical qubit patches that this instruction affects, add to mapping btwn idx:affected_logical_patches
@@ -55,18 +56,26 @@ class LatticeSurgeryToStim:
                     for patch in seen_patches:
                         if patch != y_meas_patch:
                             cubes.append((Position3D(patch[0], patch[1], bg_time), "ZXZ", ""))
+                            pipes.append((patch_last_idx[patch], len(cubes)-1))
+                            patch_last_idx[patch] = len(cubes)-1
                 else:
                     if patches[0] not in seen_patches:
-                        cubes.append((Position3D(patches[0][0], patches[0][1], bg_time), "P", f"In_Idle_{patches[0][0]}_{patches[0][1]}"))
+                        cubes.append((Position3D(patches[0][0], patches[0][1], bg_time), "P", f"In_Idle_{patches[0][0]}{patches[0][1]}"))
                         seen_patches.append(patches[0])
+                        patch_last_idx[patches[0]] = len(cubes)-1
                     else:
                         cubes.append((Position3D(patches[0][0], patches[0][1], bg_time), "ZXZ", ""))
+                        pipes.append((patch_last_idx[patches[0]], len(cubes)-1))
+                        patch_last_idx[patches[0]] = len(cubes)-1
 
                     for patch in seen_patches:
                         if patch == (patches[0][0], patches[0][1]):
                             continue
 
                         cubes.append((Position3D(patch[0], patch[1], bg_time), "ZXZ", ""))
+                        pipes.append((patch_last_idx[patch], len(cubes)-1))
+                        patch_last_idx[patch] = len(cubes)-1
+
 
                 bg_time += 1
 
@@ -79,24 +88,35 @@ class LatticeSurgeryToStim:
                 if patches[0] in seen_patches: # TODO make sure to remove patches from seen_patches when they are discarded
                     raise Exception("Shouldn't be injecting T on a patch that already exists")
                 
-                cubes.append((Position3D(patches[0][0], patches[0][1], bg_time), "ZXZ", f"S_{patches[0][0]}_{patches[0][1]}_{unique_counter}")) # TODO need to make this label unique -- if inject T on same patch twice, need some other counter to make it unique
+                cubes.append((Position3D(patches[0][0], patches[0][1], bg_time), "ZXZ", f"S_{patches[0][0]}{patches[0][1]}_{unique_counter}")) # TODO need to make this label unique -- if inject T on same patch twice, need some other counter to make it unique
                 unique_counter += 1
+                patch_last_idx[patches[0]] = len(cubes)-1
 
                 for patch in seen_patches:
                     cubes.append((Position3D(patch[0], patch[1], bg_time), "ZXZ", ""))
+                    pipes.append((patch_last_idx[patch], len(cubes)-1))
+                    patch_last_idx[patch] = len(cubes)-1
 
                 seen_patches.append(patches[0])
                 bg_time += 1
             
-            elif name == "MERGE":
+            elif name == "MERGE": # TODO handle with routing qubits merge
+                new_patches = []
                 for patch in patches:
                     if patch not in seen_patches:
                         seen_patches.append(patch)
+                        new_patches.append(patch)
                     
                 for patch in seen_patches:
                     cubes.append((Position3D(patch[0], patch[1], bg_time), "ZXZ", ""))
+                    if patch not in new_patches:
+                        pipes.append((patch_last_idx[patch], len(cubes)-1))
+                        patch_last_idx[patch] = len(cubes)-1
+                    else:
+                        patch_last_idx[patch] = len(cubes)-1
 
                 # TODO: DO SOMETHING WITH PIPES for the 2 patches being merged only!
+                pipes.append((len(cubes)-2, len(cubes)-1)) # TODO: hard coded for merges with only 2 qubits involved -- need to generalize/change
                 bg_time += 1
             
             elif name == "DISCARD":
@@ -113,7 +133,10 @@ class LatticeSurgeryToStim:
                 if patches[0] not in seen_patches:
                     raise Exception("This patch should have been seen at this point if we are doing Y_MEAS on it")
 
-                cubes.append((Position3D(patches[0][0], patches[0][1], bg_time), "ZXZ", ""))
+                cubes.append((Position3D(patches[0][0], patches[0][1], bg_time), "ZXZ", f"Y_{patches[0][0]}{patches[0][1]}_{unique_counter}"))
+                unique_counter += 1
+                pipes.append((patch_last_idx[patches[0]], len(cubes)-1))
+                patch_last_idx[patches[0]] = len(cubes)-1
                 
                 # for patch in seen_patches:
                 #     cubes.append((Position3D(patch[0], patch[1], bg_time), "ZXZ", ""))
@@ -129,6 +152,24 @@ class LatticeSurgeryToStim:
             
         for cube in cubes:
             print(cube)
+        for pipe in pipes:
+            print(pipe)
+        
+        for pos, kind, label in cubes:
+            g.add_cube(pos, kind, label)
+
+        for p0, p1 in pipes:
+            g.add_pipe(cubes[p0][0], cubes[p1][0])
+
+        filled = g.fill_ports_for_minimal_simulation()
+        fg = filled[0]
+        compiled = compile_block_graph(fg.graph)
+
+        print("=== GHZ-3 Lattice Surgery Compilation (with to_rg optimization) ===")
+        for k in [1]: # , 2, 3
+            circ = compiled.generate_stim_circuit(k=k)
+            d = 2 * k + 1
+            print(circ)
 
     
 
