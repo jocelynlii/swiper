@@ -389,6 +389,7 @@ class DecoderManager:
             if all(val == False for val in task.used_parent_speculations.values()) and all(self._is_verified_task(parent_idx) for parent_idx in self._window_idx_dag.predecessors(task_idx)):
                 verified_tasks |= self._verify_task_and_children(task_idx) # verify task and children, add to verified tasks
         self._decoded_unverified_tasks -= verified_tasks # subtract from unverified tasks list
+        # print(verified_tasks)
 
         decoded_instructions = set()
         for instr_idx in self._not_fully_decoded_instructions:
@@ -493,7 +494,13 @@ class DecoderManager:
             task.speculation_completion_time = -1
             task.completed_speculation = False
         task.speculation_modifiers = {} # reset, bc now we need to completely reset speculation from verified state
-        if task.window.speculation_accuracy > 0: # 0.5
+        # if ((task.window.speculation_accuracy > 0.7 and (not self._instructions[sorted(task.window.parent_instr_idx)[0]].t_gate_bool or self._instructions[sorted(task.window.parent_instr_idx)[0]].group_name == "COND_S")) 
+        #     or (task.window.speculation_accuracy > 0.8 and self._instructions[sorted(task.window.parent_instr_idx)[0]].t_gate_bool and self._instructions[sorted(task.window.parent_instr_idx)[0]].group_name != "COND_S")): # 0.5  task.window.speculation_accuracy > 0
+        #     self._pending_speculate_tasks.add(task_idx) # add anew to pending speculate tasks list
+
+        # self._pending_speculate_tasks.add(task_idx)
+
+        if ((task.window.speculation_accuracy > 0.8)): # 0.5  task.window.speculation_accuracy > 0
             self._pending_speculate_tasks.add(task_idx) # add anew to pending speculate tasks list
         assert task_idx not in self._active_speculation_progress and task.speculation_start_time == -1 and task.speculation_completion_time == -1 and not task.completed_speculation
         return task
@@ -523,6 +530,23 @@ class DecoderManager:
                         poisoned_indices += self._poisoned_task_reset_children_that_used_decoding(child_idx) # recursively go through child now for this to get the indices of all of its successors too TODO why are we doing this for scuccessors policy? I guess find all the iwndows that were affected?
                     self._reset_decode_task(child_idx) # reset decode task of child that finished decoding because it's invalid now
         return poisoned_indices # return a list of all reset descendant tasks (not including self) (TODO but I'm pretty sure it's always empty)
+    
+    def get_speculation_depth(self, parent_idx, depth) -> int:
+        task = self._get_task(parent_idx)
+        parents = list(self._window_idx_dag.predecessors(task.window_idx))
+        maxDepth = depth
+
+        if all(self._completed_decoding(parent_idx) for parent_idx in parents):
+            return depth
+        else:
+            for parent_idx in parents:
+                if not self._completed_decoding(parent_idx) and self._completed_speculation(parent_idx):
+                    depth1 = self.get_speculation_depth(parent_idx, depth+1)
+                    if depth1 > maxDepth:
+                        maxDepth = depth1
+
+            return maxDepth
+
 
     def update_decoding(self, new_windows: list[DecodingWindow], purged_indices: list[int], window_idx_dag: nx.DiGraph) -> None:
         """Update state of processing windows and start any new decoding
@@ -548,9 +572,16 @@ class DecoderManager:
             # self._pending_speculate_tasks |= new_task_indices
             copy_new_task_indices = new_task_indices.copy()
             for task in new_tasks:
-                if task.window.speculation_accuracy > 0 and task.window.window_idx in copy_new_task_indices: # .5
+                # if ((task.window.speculation_accuracy > 0.7 and (not self._instructions[sorted(task.window.parent_instr_idx)[0]].t_gate_bool or self._instructions[sorted(task.window.parent_instr_idx)[0]].group_name == "COND_S")) 
+                #     or (task.window.speculation_accuracy > 0.8 and self._instructions[sorted(task.window.parent_instr_idx)[0]].t_gate_bool and self._instructions[sorted(task.window.parent_instr_idx)[0]].group_name != "COND_S")) and task.window.window_idx in copy_new_task_indices: # .5
+                #     self._pending_speculate_tasks.add(task.window.window_idx)
+                #     copy_new_task_indices.remove(task.window.window_idx)
+                if ((task.window.speculation_accuracy > 0.8)) and task.window.window_idx in copy_new_task_indices: # .5
                     self._pending_speculate_tasks.add(task.window.window_idx)
                     copy_new_task_indices.remove(task.window.window_idx)
+                # if task.window.window_idx in copy_new_task_indices: # .5
+                #     self._pending_speculate_tasks.add(task.window.window_idx)
+                #     copy_new_task_indices.remove(task.window.window_idx)
         
         # print("pending decode tasks2 ", self._pending_decode_tasks)
         # get the length needed for the tasks_by_idx list, which stores the number of tasks per window index (so we want to get the maximum window index to get the length of this list)
@@ -570,27 +601,276 @@ class DecoderManager:
         unprocessed_task_indices = self._pending_decode_tasks | self._pending_speculate_tasks # get all unprocessed task indexes (include both decode and speculate tasks)
         # print("pending decode tasks3 ", self._pending_decode_tasks)
 
-        # TODO ADDED: initially iterate through unprocessed_task_indices and get the most parallel ones to launch based on max parallel processes
-        # this is restricting the NUMBER OF DECODERS, NOT the number of SPECULATORS
-        next_tasks_to_decode = []
-        for task_idx in unprocessed_task_indices:
-            task = self._get_task(task_idx)
+        next_tasks_to_decode = defaultdict(list)
+        next_tasks = []
+        # all(val == False for val in task.used_parent_speculations.values())
+        # # CANNOT USE THIS BECAUSE AT THIS POINT TASK's USED_PARENT_SPECULATIONS IS NOT UPDATED YET!!!
+        # if self.max_parallel_processes:
+        #     # print(self._decoded_unverified_tasks)
+        #     for task_idx in unprocessed_task_indices:
+        #         if task_idx in self._active_window_progress:
+        #             continue
 
-            if self.max_parallel_processes and len(next_tasks_to_decode) >= self.max_parallel_processes - len(self._active_window_progress):
-                break
-            
-            if task_idx in self._pending_decode_tasks:
-                parents = list(self._window_idx_dag.predecessors(task.window_idx))
-                if any(not (self._completed_decoding(parent_idx) or self._completed_speculation(parent_idx)) for parent_idx in parents): 
+        #         task = self._get_task(task_idx)
+
+        #         # if len(next_tasks_to_decode) >= self.max_parallel_processes - len(self._active_window_progress):
+        #         #     break
+
+        #         if task_idx in self._pending_decode_tasks:
+        #             parents = list(self._window_idx_dag.predecessors(task.window_idx))
+        #             if any(not (self._completed_decoding(parent_idx) or self._completed_speculation(parent_idx)) for parent_idx in parents): 
+        #                 continue
+
+        #             if all(val == False for val in task.used_parent_speculations.values()):
+        #                 next_tasks_to_decode[0].append(task_idx)
+        #                 continue
+        #             else:
+        #                 parent_done = True
+        #                 for parent_idx in parents:
+        #                     parent_task = self._get_task(parent_idx)
+        #                     parents_parents = list(self._window_idx_dag.predecessors(parent_task.window_idx))
+
+        #                     if not all(val == False for val in parent_task.used_parent_speculations.values()):
+        #                         parent_done = False
+        #                         break
+
+        #                 if parent_done:
+        #                     next_tasks_to_decode[1].append(task_idx)
+        #                 else: # added only below
+        #                     parent_parent_done = True
+        #                     for parent_idx in parents:
+        #                         parent_task = self._get_task(parent_idx)
+        #                         parents_parents = list(self._window_idx_dag.predecessors(parent_task.window_idx))
+
+        #                         for parent_parent_idx in parents_parents:
+        #                             parent_parent_task = self._get_task(parent_parent_idx)
+        #                             parents_parents_parents = list(self._window_idx_dag.predecessors(parent_parent_task.window_idx))
+
+        #                             if not all(val == False for val in parent_parent_task.used_parent_speculations.values()):
+        #                                 parent_parent_done = False
+        #                                 break
+
+        #                         if not parent_parent_done:
+        #                             break
+
+        #                     if parent_parent_done:
+        #                         next_tasks_to_decode[2].append(task_idx)
+
+        #     if next_tasks_to_decode:
+        #         for dist in sorted(next_tasks_to_decode):
+        #             val = next_tasks_to_decode[dist]
+        #             for task in val:
+        #                 next_tasks.append(task)
+
+        #                 if len(next_tasks) >= self.max_parallel_processes - len(self._active_window_progress):
+        #                     break
+                    
+        #             if len(next_tasks) >= self.max_parallel_processes - len(self._active_window_progress):
+        #                 break
+        #         print(next_tasks_to_decode)
+        #         print(next_tasks)
+
+        # this is based on completed decoding, but here I'm pretty sure I care about completed verification not completed decoding (bc completed decoding stil not verified)
+        # if self.max_parallel_processes:
+        #     for task_idx in unprocessed_task_indices:
+        #         if task_idx in self._active_window_progress:
+        #             continue
+
+        #         task = self._get_task(task_idx)
+
+        #         # if len(next_tasks_to_decode) >= self.max_parallel_processes - len(self._active_window_progress):
+        #         #     break
+
+        #         if task_idx in self._pending_decode_tasks:
+        #             parents = list(self._window_idx_dag.predecessors(task.window_idx))
+        #             if any(not (self._completed_decoding(parent_idx) or self._completed_speculation(parent_idx)) for parent_idx in parents): 
+        #                 continue
+
+        #             if all(self._completed_decoding(parent_idx) for parent_idx in parents):
+        #                 next_tasks_to_decode[0].append(task_idx)
+        #                 continue
+        #             else:
+        #                 parent_done = True
+        #                 for parent_idx in parents:
+        #                     parent_task = self._get_task(parent_idx)
+        #                     parents_parents = list(self._window_idx_dag.predecessors(parent_task.window_idx))
+
+        #                     if not all(self._completed_decoding(parent_idx) for parent_idx in parents_parents):
+        #                         parent_done = False
+        #                         break
+
+        #                 if parent_done:
+        #                     next_tasks_to_decode[1].append(task_idx)
+        #                 else: # added only below
+        #                     parent_parent_done = True
+        #                     for parent_idx in parents:
+        #                         parent_task = self._get_task(parent_idx)
+        #                         parents_parents = list(self._window_idx_dag.predecessors(parent_task.window_idx))
+
+        #                         for parent_parent_idx in parents_parents:
+        #                             parent_parent_task = self._get_task(parent_parent_idx)
+        #                             parents_parents_parents = list(self._window_idx_dag.predecessors(parent_parent_task.window_idx))
+
+        #                             if not all(self._completed_decoding(parent_idx) for parent_idx in parents_parents_parents):
+        #                                 parent_parent_done = False
+        #                                 break
+
+        #                         if not parent_parent_done:
+        #                             break
+
+        #                     if parent_parent_done:
+        #                         next_tasks_to_decode[2].append(task_idx)
+
+        #     if next_tasks_to_decode:
+        #         for dist in sorted(next_tasks_to_decode):
+        #             val = next_tasks_to_decode[dist]
+        #             for task in val:
+        #                 next_tasks.append(task)
+
+        #                 if len(next_tasks) >= self.max_parallel_processes - len(self._active_window_progress):
+        #                     break
+                    
+        #             if len(next_tasks) >= self.max_parallel_processes - len(self._active_window_progress):
+        #                 break
+        #         print(next_tasks_to_decode)
+        #         print(next_tasks)
+
+        # self._is_verified_task(task_idx)
+        # THIS ONE BELOW IS THE ONE -- after checking with verified tasks, this is the one that follows the expected pattern!!!   
+        if self.max_parallel_processes:
+            for task_idx in unprocessed_task_indices:
+                if task_idx in self._active_window_progress:
                     continue
-                # begin decoding
-                assert not self._completed_decoding(task_idx) and task_idx not in self._active_window_progress
 
-                # if this window's dependencies are NOT speculated ones, then we always definitely want to decode this window first
+                task = self._get_task(task_idx)
 
-                # if this window's dependences ARE speculated ones, then we want to reconsider whether to decode this window or another one that has less deep speculation
+                # if len(next_tasks_to_decode) >= self.max_parallel_processes - len(self._active_window_progress):
+                #     break
+
+                if task_idx in self._pending_decode_tasks:
+                    parents = list(self._window_idx_dag.predecessors(task.window_idx))
+                    if any(not (self._completed_decoding(parent_idx) or self._completed_speculation(parent_idx)) for parent_idx in parents): 
+                        continue
+
+                    if all(self._is_verified_task(parent_idx) for parent_idx in parents):
+                        next_tasks_to_decode[0].append(task_idx)
+                        continue
+                    else:
+                        parent_done = True
+                        for parent_idx in parents:
+                            parent_task = self._get_task(parent_idx)
+                            parents_parents = list(self._window_idx_dag.predecessors(parent_task.window_idx))
+
+                            if not all(self._is_verified_task(parent_idx) for parent_idx in parents_parents):
+                                parent_done = False
+                                break
+
+                        if parent_done:
+                            next_tasks_to_decode[1].append(task_idx)
+                        else: # added only below
+                            parent_parent_done = True
+                            for parent_idx in parents:
+                                parent_task = self._get_task(parent_idx)
+                                parents_parents = list(self._window_idx_dag.predecessors(parent_task.window_idx))
+
+                                for parent_parent_idx in parents_parents:
+                                    parent_parent_task = self._get_task(parent_parent_idx)
+                                    parents_parents_parents = list(self._window_idx_dag.predecessors(parent_parent_task.window_idx))
+
+                                    if not all(self._is_verified_task(parent_idx) for parent_idx in parents_parents_parents):
+                                        parent_parent_done = False
+                                        break
+
+                                if not parent_parent_done:
+                                    break
+
+                            if parent_parent_done:
+                                next_tasks_to_decode[2].append(task_idx)
+
+            # if next_tasks_to_decode:
+            #     for dist in sorted(next_tasks_to_decode):
+            #         val = next_tasks_to_decode[dist]
+            #         for task in val:
+            #             next_tasks.append(task)
+
+            #             if len(next_tasks) >= self.max_parallel_processes - len(self._active_window_progress):
+            #                 break
+                    
+            #         if len(next_tasks) >= self.max_parallel_processes - len(self._active_window_progress):
+            #             break
+            #     print(next_tasks_to_decode)
+                # print(next_tasks)
+
+            if next_tasks_to_decode:
+                for dist in sorted(next_tasks_to_decode, reverse=True):
+                    val = next_tasks_to_decode[dist]
+                    for task in val:
+                        next_tasks.append(task)
+
+                        if len(next_tasks) >= self.max_parallel_processes - len(self._active_window_progress):
+                            break
+                    
+                    if len(next_tasks) >= self.max_parallel_processes - len(self._active_window_progress):
+                        break
+                # print(next_tasks_to_decode)
+            
+
+        # # TODO ADDED: initially iterate through unprocessed_task_indices and get the most parallel ones to launch based on max parallel processes
+        # # this is restricting the NUMBER OF DECODERS, NOT the number of SPECULATORS
+        # next_tasks_to_decode = []
+        # print("b4 parallel processes new")
+        # if self.max_parallel_processes:
+        #     print("in max parallel procs")
+        #     no_speculation_tasks = []
+        #     speculation_dists = defaultdict(list)
+        #     for task_idx in unprocessed_task_indices:
+        #         task = self._get_task(task_idx)
+
+        #         # if self.max_parallel_processes and len(next_tasks_to_decode) >= self.max_parallel_processes - len(self._active_window_progress):
+        #         #     break
                 
+        #         if task_idx in self._pending_decode_tasks:
+        #             parents = list(self._window_idx_dag.predecessors(task.window_idx))
+        #             if any(not (self._completed_decoding(parent_idx) or self._completed_speculation(parent_idx)) for parent_idx in parents): 
+        #                 continue
+        #             # begin decoding
+        #             assert not self._completed_decoding(task_idx) and task_idx not in self._active_window_progress
+        #             print("after assert ever?")
 
+                    
+
+        #             # if this window's dependencies are NOT speculated ones, then we always definitely want to decode this window first
+        #             if all(self._completed_decoding(parent_idx) for parent_idx in parents):
+        #                 no_speculation_tasks.append(task_idx)
+        #             else: # at least one of this window's deps is speculated
+        #                 for parent_idx in parents:
+        #                     if not self._completed_decoding(parent_idx) and self._completed_speculation(parent_idx):
+        #                         depth = self.get_speculation_depth(parent_idx, 1)
+        #                         speculation_dists[depth].append(parent_idx)
+
+        #     print("before while next tasks to decode")
+        #     print(no_speculation_tasks)
+        #     print(speculation_dists)
+        #     print(self.max_parallel_processes - len(self._active_window_progress))
+        #     while len(next_tasks_to_decode) < self.max_parallel_processes - len(self._active_window_progress) and len(no_speculation_tasks) > 0 and speculation_dists:
+        #         # print(next_tasks_to_decode)
+        #         if len(no_speculation_tasks) > 0:
+        #             next_tasks_to_decode.append(no_speculation_tasks[0])
+        #             no_speculation_tasks.pop(0)
+
+        #         if speculation_dists:
+        #             smallest_key = min(speculation_dists)
+        #             if speculation_dists[smallest_key]:
+        #                 first_val = speculation_dists[smallest_key][0]
+        #                 next_tasks_to_decode.append(first_val)
+        #                 speculation_dists[smallest_key].pop(0)
+        #                 if len(speculation_dists[smallest_key]) == 0:
+        #                     del speculation_dists[smallest_key]
+
+        #         # if this window's dependences ARE speculated ones, then we want to reconsider whether to decode this window or another one that has less deep speculation
+                
+        # print("after parallel processes new")
+        # print(next_tasks_to_decode)
 
         while len(unprocessed_task_indices) > 0: # process tasks
             task_idx = unprocessed_task_indices.pop()
@@ -619,47 +899,104 @@ class DecoderManager:
             
             # if the task index is in the pending decode tasks array
             # print("pending decode tasks ", self._pending_decode_tasks)
-            if task_idx in self._pending_decode_tasks:
-                # window has not been processed yet
-                parents = list(self._window_idx_dag.predecessors(task.window_idx)) # get parent windows
-                # print("parents pending decoding ", parents)
-                # if any of the parents have not completed decoding or completed speculation, then we can't decode yet, since we haven't received our (actual or predicted) dependency bits
-                if any(not (self._completed_decoding(parent_idx) or self._completed_speculation(parent_idx)) for parent_idx in parents): 
-                    # print("IN THIS BREAK4")
-                    continue
-                # begin decoding
-                assert not self._completed_decoding(task_idx) and task_idx not in self._active_window_progress # assert this window has not started decoding yet and has not completed
-                self._pending_decode_tasks.remove(task_idx)
-                task.decoding_start_time = self._current_round
-                x = task.window.decoding_time_fn(task.window.total_spacetime_volume()) # self.decoding_time_function(task.window.total_spacetime_volume()) 
-                if len(self._per_window_wasted_rounds) <= task.window_idx:
-                    self._per_window_wasted_rounds += [0] * (task.window_idx-len(self._per_window_wasted_rounds)+1)
-                if len(self._per_window_poisoned) <= task.window_idx:
-                    self._per_window_poisoned += [0] * (task.window_idx-len(self._per_window_poisoned)+1)
-                # print("decoding time fcn result ", x)
-                self._active_window_progress[task_idx] = x # self.decoding_time_function(task.window.total_spacetime_volume()) # set the remaining decoding time for this task (which rn, is the total decoding time for this window)
-                task.used_parent_speculations = {}
-                for parent_idx in parents: # check for each parent, whether we're using their speculated result or their actual verified result
-                    parent = self._get_task(parent_idx)
-                    if parent.completed_decoding:
-                        task.used_parent_speculations[parent_idx] = False
-                    else:
-                        assert parent.completed_speculation
-                        task.used_parent_speculations[parent_idx] = True
-                # if we're in integrated mode for speculation, we want to begin the speculation WITH the decoding (unlike separate mode, whose speculation was started above)
-                if self.speculation_mode == 'integrated' and task_idx in self._pending_speculate_tasks: # if our task is in the pending speculation tasks
-                    # begin a speculation along with decoding
-                    assert task_idx not in self._active_speculation_progress # has not started speculating
-                    self._pending_speculate_tasks.remove(task_idx)
-                    task.speculation_start_time = self._current_round
-                    # handle speculation time
-                    if task.window.speculation_time > 0: # if self.speculation_time > 0:
-                        self._active_speculation_progress[task_idx] = task.window.speculation_time # self.speculation_time
-                    else:
-                        self._get_task(task_idx).completed_speculation = True
-                        # add to unprocessed (but rdy to start processing) task indices all of this window's successors (which depended on this window), if these successors have a task and have not completed decoding
-                        # TODO what if these windows have multiple dependencies
-                        unprocessed_task_indices |= {w_idx for w_idx in self._window_idx_dag.successors(task.window_idx) if not (self._get_task_or_none(w_idx) is None or self._get_task(w_idx).completed_decoding)}
+            if self.max_parallel_processes:
+                if task_idx in self._pending_decode_tasks: #  and task_idx in next_tasks_to_decode
+                    # TODO technically we would need to first calculate how many next tasks we have then if we don't have enough
+                    # we would want to grab from the front instead of us grabbing from the back in case the back doesn't have 
+                    # enough tasks to fill our load
+                    if len(next_tasks) > 0:
+                        if not (len(self._active_window_progress) + len(next_tasks) < self.max_parallel_processes):
+                            if task_idx not in next_tasks:
+                                continue
+                            else:
+                                next_tasks.remove(task_idx)
+                        else:
+                            if task_idx in next_tasks:
+                                next_tasks.remove(task_idx)
+                    # window has not been processed yet
+                    parents = list(self._window_idx_dag.predecessors(task.window_idx)) # get parent windows
+                    # print("parents pending decoding ", parents)
+                    # if any of the parents have not completed decoding or completed speculation, then we can't decode yet, since we haven't received our (actual or predicted) dependency bits
+                    if any(not (self._completed_decoding(parent_idx) or self._completed_speculation(parent_idx)) for parent_idx in parents): 
+                        # print("IN THIS BREAK4")
+                        continue
+                    # begin decoding
+                    assert not self._completed_decoding(task_idx) and task_idx not in self._active_window_progress # assert this window has not started decoding yet and has not completed
+                    self._pending_decode_tasks.remove(task_idx)
+                    task.decoding_start_time = self._current_round
+                    x = task.window.decoding_time_fn(task.window.total_spacetime_volume()) # self.decoding_time_function(task.window.total_spacetime_volume()) 
+                    if len(self._per_window_wasted_rounds) <= task.window_idx:
+                        self._per_window_wasted_rounds += [0] * (task.window_idx-len(self._per_window_wasted_rounds)+1)
+                    if len(self._per_window_poisoned) <= task.window_idx:
+                        self._per_window_poisoned += [0] * (task.window_idx-len(self._per_window_poisoned)+1)
+                    # print("decoding time fcn result ", x)
+                    # print(task_idx)
+                    self._active_window_progress[task_idx] = x # self.decoding_time_function(task.window.total_spacetime_volume()) # set the remaining decoding time for this task (which rn, is the total decoding time for this window)
+                    task.used_parent_speculations = {}
+                    for parent_idx in parents: # check for each parent, whether we're using their speculated result or their actual verified result
+                        parent = self._get_task(parent_idx)
+                        if parent.completed_decoding:
+                            task.used_parent_speculations[parent_idx] = False
+                        else:
+                            assert parent.completed_speculation
+                            task.used_parent_speculations[parent_idx] = True
+                    # if we're in integrated mode for speculation, we want to begin the speculation WITH the decoding (unlike separate mode, whose speculation was started above)
+                    if self.speculation_mode == 'integrated' and task_idx in self._pending_speculate_tasks: # if our task is in the pending speculation tasks
+                        # begin a speculation along with decoding
+                        assert task_idx not in self._active_speculation_progress # has not started speculating
+                        self._pending_speculate_tasks.remove(task_idx)
+                        task.speculation_start_time = self._current_round
+                        # handle speculation time
+                        if task.window.speculation_time > 0: # if self.speculation_time > 0:
+                            self._active_speculation_progress[task_idx] = task.window.speculation_time # self.speculation_time
+                        else:
+                            self._get_task(task_idx).completed_speculation = True
+                            # add to unprocessed (but rdy to start processing) task indices all of this window's successors (which depended on this window), if these successors have a task and have not completed decoding
+                            # TODO what if these windows have multiple dependencies
+                            unprocessed_task_indices |= {w_idx for w_idx in self._window_idx_dag.successors(task.window_idx) if not (self._get_task_or_none(w_idx) is None or self._get_task(w_idx).completed_decoding)}
+            else:
+                if task_idx in self._pending_decode_tasks:
+                    # window has not been processed yet
+                    parents = list(self._window_idx_dag.predecessors(task.window_idx)) # get parent windows
+                    # print("parents pending decoding ", parents)
+                    # if any of the parents have not completed decoding or completed speculation, then we can't decode yet, since we haven't received our (actual or predicted) dependency bits
+                    if any(not (self._completed_decoding(parent_idx) or self._completed_speculation(parent_idx)) for parent_idx in parents): 
+                        # print("IN THIS BREAK4")
+                        continue
+                    # begin decoding
+                    assert not self._completed_decoding(task_idx) and task_idx not in self._active_window_progress # assert this window has not started decoding yet and has not completed
+                    self._pending_decode_tasks.remove(task_idx)
+                    task.decoding_start_time = self._current_round
+                    x = task.window.decoding_time_fn(task.window.total_spacetime_volume()) # self.decoding_time_function(task.window.total_spacetime_volume()) 
+                    if len(self._per_window_wasted_rounds) <= task.window_idx:
+                        self._per_window_wasted_rounds += [0] * (task.window_idx-len(self._per_window_wasted_rounds)+1)
+                    if len(self._per_window_poisoned) <= task.window_idx:
+                        self._per_window_poisoned += [0] * (task.window_idx-len(self._per_window_poisoned)+1)
+                    # print("decoding time fcn result ", x)
+                    # print(task_idx)
+                    self._active_window_progress[task_idx] = x # self.decoding_time_function(task.window.total_spacetime_volume()) # set the remaining decoding time for this task (which rn, is the total decoding time for this window)
+                    task.used_parent_speculations = {}
+                    for parent_idx in parents: # check for each parent, whether we're using their speculated result or their actual verified result
+                        parent = self._get_task(parent_idx)
+                        if parent.completed_decoding:
+                            task.used_parent_speculations[parent_idx] = False
+                        else:
+                            assert parent.completed_speculation
+                            task.used_parent_speculations[parent_idx] = True
+                    # if we're in integrated mode for speculation, we want to begin the speculation WITH the decoding (unlike separate mode, whose speculation was started above)
+                    if self.speculation_mode == 'integrated' and task_idx in self._pending_speculate_tasks: # if our task is in the pending speculation tasks
+                        # begin a speculation along with decoding
+                        assert task_idx not in self._active_speculation_progress # has not started speculating
+                        self._pending_speculate_tasks.remove(task_idx)
+                        task.speculation_start_time = self._current_round
+                        # handle speculation time
+                        if task.window.speculation_time > 0: # if self.speculation_time > 0:
+                            self._active_speculation_progress[task_idx] = task.window.speculation_time # self.speculation_time
+                        else:
+                            self._get_task(task_idx).completed_speculation = True
+                            # add to unprocessed (but rdy to start processing) task indices all of this window's successors (which depended on this window), if these successors have a task and have not completed decoding
+                            # TODO what if these windows have multiple dependencies
+                            unprocessed_task_indices |= {w_idx for w_idx in self._window_idx_dag.successors(task.window_idx) if not (self._get_task_or_none(w_idx) is None or self._get_task(w_idx).completed_decoding)}
     
     # check if a task is done completed decoding or not
     def _completed_decoding(self, task_idx: int) -> bool:

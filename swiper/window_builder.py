@@ -435,7 +435,7 @@ class WindowBuilder():
                 parent_instr_idx=parent_instr_idx,
                 window_idx=self._created_window_count,
                 constructed=False,
-                speculation_accuracy= 0.8 if (sorted(parent_instr_idx)[0] == -1 or not self.schedule_insts[sorted(parent_instr_idx)[0]].instruction.t_gate_bool ) else 0.5, # or self.schedule_insts[sorted(parent_instr_idx)[0]].instruction.name == "COND_S"  # random.uniform(0, 1), # 0.9, # curr_speculation_accuracy, # 0.6 # np.random.rand()
+                speculation_accuracy= random.uniform(0, 1), # 0.8 if (sorted(parent_instr_idx)[0] == -1 or not self.schedule_insts[sorted(parent_instr_idx)[0]].instruction.t_gate_bool ) else 0.5, # or self.schedule_insts[sorted(parent_instr_idx)[0]].instruction.name == "COND_S"  # random.uniform(0, 1), # 0.9, # curr_speculation_accuracy, # 0.6 # np.random.rand()
                 speculation_time=1, # curr_speculation_time,
                 decoding_time_fn= lambda _: 14,
                 decoding_time_fn_str="lambda _: 14"
@@ -516,7 +516,7 @@ class WindowBuilder():
                 parent_instr_idx=parent_instr_idx,
                 window_idx=self._created_window_count,
                 constructed=False,
-                speculation_accuracy= 0.8 if (sorted(parent_instr_idx)[0] == -1 or not self.schedule_insts[sorted(parent_instr_idx)[0]].instruction.t_gate_bool) else 0.5, #  or self.schedule_insts[sorted(parent_instr_idx)[0]].instruction.name == "COND_S" # random.uniform(0, 1), # 0.9, # curr_speculation_accuracy, # 0.6 # np.random.rand()
+                speculation_accuracy= random.uniform(0, 1), # 0.8 if (sorted(parent_instr_idx)[0] == -1 or not self.schedule_insts[sorted(parent_instr_idx)[0]].instruction.t_gate_bool) else 0.5, #  or self.schedule_insts[sorted(parent_instr_idx)[0]].instruction.name == "COND_S" # random.uniform(0, 1), # 0.9, # curr_speculation_accuracy, # 0.6 # np.random.rand()
                 speculation_time= 1, # curr_speculation_time,
                 decoding_time_fn= lambda _: 14,
                 decoding_time_fn_str="lambda _: 14"
