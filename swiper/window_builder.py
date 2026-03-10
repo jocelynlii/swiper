@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from typing import Callable
 import math
 import numpy as np
+import random
 from collections import defaultdict
 
 from swiper.lattice_surgery_schedule import Instruction
@@ -232,7 +233,7 @@ class DecodingWindow:
         return f'Window({self.commit_region}, {self.buffer_regions}, {self.parent_instr_idx}, {self.constructed}, EDIT: {self.speculation_accuracy}, {self.speculation_time}, {self.decoding_time_fn})'
 
 class WindowBuilder():
-    def __init__(self, d: int, lightweight_setting: int = 0, decoder_parameters: list[dict[str, float]] = None, window_parameters: dict | None = None) -> None:
+    def __init__(self, d: int, lightweight_setting: int = 0, decoder_parameters: list[dict[str, float]] = None, window_parameters: dict | None = None, schedule_insts: list | None = None) -> None:
         self._patch_groups: dict[tuple[int, int], list[int]] = {}
         self._all_rounds: list[SyndromeRound] = []
         self._waiting_rounds: set[int] = set()
@@ -244,6 +245,8 @@ class WindowBuilder():
         self.lightweight_setting = lightweight_setting
         self.decoder_paramters = decoder_parameters
         self.window_parameters = window_parameters
+        self.schedule_insts = schedule_insts
+        self.flip_flag= False
 
     # I don't think I need to do this for cmt rgns because I've only ever seen one SR for commit region
     # But I do think I need to do this for buffer rgns because I've seen many SRs for buffer region
@@ -432,7 +435,7 @@ class WindowBuilder():
                 parent_instr_idx=parent_instr_idx,
                 window_idx=self._created_window_count,
                 constructed=False,
-                speculation_accuracy= 0.9, # curr_speculation_accuracy, # 0.6 # np.random.rand()
+                speculation_accuracy= 0.8 if (sorted(parent_instr_idx)[0] == -1 or not self.schedule_insts[sorted(parent_instr_idx)[0]].instruction.t_gate_bool ) else 0.5, # or self.schedule_insts[sorted(parent_instr_idx)[0]].instruction.name == "COND_S"  # random.uniform(0, 1), # 0.9, # curr_speculation_accuracy, # 0.6 # np.random.rand()
                 speculation_time=1, # curr_speculation_time,
                 decoding_time_fn= lambda _: 14,
                 decoding_time_fn_str="lambda _: 14"
@@ -513,7 +516,7 @@ class WindowBuilder():
                 parent_instr_idx=parent_instr_idx,
                 window_idx=self._created_window_count,
                 constructed=False,
-                speculation_accuracy= 0.9, # curr_speculation_accuracy, # 0.6 # np.random.rand()
+                speculation_accuracy= 0.8 if (sorted(parent_instr_idx)[0] == -1 or not self.schedule_insts[sorted(parent_instr_idx)[0]].instruction.t_gate_bool) else 0.5, #  or self.schedule_insts[sorted(parent_instr_idx)[0]].instruction.name == "COND_S" # random.uniform(0, 1), # 0.9, # curr_speculation_accuracy, # 0.6 # np.random.rand()
                 speculation_time= 1, # curr_speculation_time,
                 decoding_time_fn= lambda _: 14,
                 decoding_time_fn_str="lambda _: 14"

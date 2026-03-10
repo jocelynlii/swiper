@@ -140,12 +140,13 @@ def add_noise(circ, p):
             noisy.append(inst)
 
             # depolarizing after 2-qubit gates
-            if inst.name == "CX":
+            if inst.name == "CX" or inst.name == "CZ":
                 noisy.append("DEPOLARIZE2", inst.targets_copy(), p)
 
             # measurement noise
             elif inst.name in ("M", "MX", "MY"):
                 noisy.append("X_ERROR", inst.targets_copy(), p)
+                # noisy.append("Z_ERROR", inst.targets_copy(), p)
 
         return noisy
     
@@ -153,16 +154,17 @@ def add_noise(circ, p):
 
 # num_shots = number of shots taken, d = code distance, p = physical error probability, ignore_steps = ignore some step of the predictor
 def simulate_temporal_speculation(num_shots, d, p, ignore_steps=[]):
-    # circ = stim.Circuit.generated("surface_code:rotated_memory_x", # type of prebuilt stim circuit
+    # circ = stim.Circuit.generated("surface_code:rotated_memory_z", # type of prebuilt stim circuit
     #                           distance=d, rounds=2*d, # distance = code distance, rounds = # measurement rounds. total volume/# measurements = 2d^3
-    #                           after_clifford_depolarization=0.001, # pauli depolarizing noise after each clifford gate (error)
-    #                           before_measure_flip_probability=0.001, # measurement outcome flipped probability (error)
+    #                           after_clifford_depolarization=p, # pauli depolarizing noise after each clifford gate (error)
+    #                           before_measure_flip_probability=p, # measurement outcome flipped probability (error)
     #                           )
     # print(circ)
-    circ = stim.Circuit.from_file("out.stim")
-    circ = add_noise(circ, p)
-    print(circ)
+    circ = stim.Circuit.from_file("y_meas.stim")
+    # circ = add_noise(circ, p)
+    # print(circ)
     coords_dict = circ.detector_error_model().get_detector_coordinates() # map detector IDs to detector coordinates in the decoder graph. Coords = (x,y,t)
+    print(len(coords_dict))
     dem = circ.detector_error_model()
     print(any(line.startswith("error(") for line in str(dem).splitlines()))
     matching = pymatching.Matching.from_detector_error_model(circ.detector_error_model()) # matching object built from Stim's detector error model (like a min weight decoding matching map used to figure out what error chain we're looking at)
@@ -196,8 +198,10 @@ def simulate_temporal_speculation(num_shots, d, p, ignore_steps=[]):
     nx_G.remove_nodes_from(nodes_to_remove)
             
     det_dists = dict(nx.all_pairs_shortest_path_length(nx_G)) # computes shortest path distances between all pairs of nodes in the reduced decoder graph
+    # print(det_dists)
     def get_dep_weight(det1, det2): # get weight of the dependency (min # of single-qubit errors/edges to connect the 2 nodes/detectors)
-        return det_dists[det1][det2]
+        # return det_dists[det1][det2]
+        return det_dists.get(det1, {}).get(det2)
 
     weight_1_chains = [] # single edge matchings btwn boundary detectors. All chains of weight 1 that touch the temporal boundary region
     one_step_chains = [] # special case of weight-1 chains crossing btwn rounds d-1 and d (cross temporally)
@@ -227,8 +231,12 @@ def simulate_temporal_speculation(num_shots, d, p, ignore_steps=[]):
     weight_2_chains = [] # cross-boundary pairs at weight = 2
     for det1 in data_dep_srcs: # look at sources of data dependencies
         for det2 in np.where(temporal_boundary_mask)[0]: # look at which endpoints are in the temporal boundary
+            # print(det1, det2)
             if coords_dict[det2][2] >= d and get_dep_weight(det1, det2) == 2: # if the 2nd endpoint is in the buffer rgn (crosses boundary) and the weight of the edge is 2, then append to edge_2_weight
                 weight_2_chains.append((det1, det2))
+            if get_dep_weight(det1, det2) is None:
+                # print(det1, det2)
+                print("IS NONE") # I think these are cases where we try to connect w window before for patch (1,0), but patch (1,0) only spawns here
 
     match_times = [] # per-shot decode latency
     corrects = [] # boolean per shot --> speculation correct?
@@ -256,6 +264,8 @@ def simulate_temporal_speculation(num_shots, d, p, ignore_steps=[]):
         corrects.append(correct) # add whether this speculation was correct or not
     # return match_times latencies, corrects array (speculation correct or not), tuple with the ground truth matching as NetworkX object, coords_dict which maps node IDs to actual coordinates on the graph, and failure_idx which shows which shots failed and why/what the exact difference is
     print(corrects.count(True)/len(corrects))
+    print(corrects.count(True))
+    print(len(corrects))
     return match_times, corrects, (matching.to_networkx(), coords_dict, failure_idx)  
 
 def process_failures(failure_info, d):

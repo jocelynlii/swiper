@@ -5,6 +5,7 @@ import networkx as nx
 import itertools
 from swiper.window_builder import DecodingWindow
 from swiper.lattice_surgery_schedule import Instruction, Duration
+from collections import defaultdict
 
 @dataclass
 class DecoderData:
@@ -29,6 +30,8 @@ class DecoderData:
     per_window_poisoned: list[int]
     per_window_wasted_rounds: list[int]
     per_window_parent_inst: list[frozenset[int]]
+    per_window_spec_acc: dict
+    per_inst_windows: dict
 
     def to_dict(self):
         return asdict(self)
@@ -325,7 +328,7 @@ class DecoderManager:
                             # speculation rather than used decoding
                             all_poisoned_indices += self._poisoned_task_reset_children_that_used_decoding(poisoned_task_idx, only_mark_speculated=True)
                         # print("poisoned parent only ", poisoned_task.window.parent_instr_idx)
-                        self.get_dist_to_t_gate(poisoned_task_idx)
+                        # self.get_dist_to_t_gate(poisoned_task_idx)
                         # for print_inst in poisoned_task.window.parent_instr_idx:
                         #     print("poisoned task insts ", print_inst, " ", self._instructions[print_inst])
                         # dist = nx.single_source_shortest_path_length(self._window_idx_dag, poisoned_task_idx)
@@ -490,7 +493,8 @@ class DecoderManager:
             task.speculation_completion_time = -1
             task.completed_speculation = False
         task.speculation_modifiers = {} # reset, bc now we need to completely reset speculation from verified state
-        self._pending_speculate_tasks.add(task_idx) # add anew to pending speculate tasks list
+        if task.window.speculation_accuracy > 0: # 0.5
+            self._pending_speculate_tasks.add(task_idx) # add anew to pending speculate tasks list
         assert task_idx not in self._active_speculation_progress and task.speculation_start_time == -1 and task.speculation_completion_time == -1 and not task.completed_speculation
         return task
 
@@ -541,7 +545,12 @@ class DecoderManager:
         new_tasks = [DecoderTask(window=window, window_idx=window.window_idx) for window in new_windows] # create new decoder tasks for each of the new windows # TODO alternate way for window spec acc , window_speculation_accuracy=0.5
         self._pending_decode_tasks |= new_task_indices # add all of these new tasks to pending decode tasks
         if self.speculation_mode: # if we are speculating, then we also want to add the new task indices to the pending speculation tasks, since we want to speculate these
-            self._pending_speculate_tasks |= new_task_indices
+            # self._pending_speculate_tasks |= new_task_indices
+            copy_new_task_indices = new_task_indices.copy()
+            for task in new_tasks:
+                if task.window.speculation_accuracy > 0 and task.window.window_idx in copy_new_task_indices: # .5
+                    self._pending_speculate_tasks.add(task.window.window_idx)
+                    copy_new_task_indices.remove(task.window.window_idx)
         
         # print("pending decode tasks2 ", self._pending_decode_tasks)
         # get the length needed for the tasks_by_idx list, which stores the number of tasks per window index (so we want to get the maximum window index to get the length of this list)
@@ -560,6 +569,29 @@ class DecoderManager:
                     self._seen_instructions.add(instr_idx) # add this inst to the seen instructions list
         unprocessed_task_indices = self._pending_decode_tasks | self._pending_speculate_tasks # get all unprocessed task indexes (include both decode and speculate tasks)
         # print("pending decode tasks3 ", self._pending_decode_tasks)
+
+        # TODO ADDED: initially iterate through unprocessed_task_indices and get the most parallel ones to launch based on max parallel processes
+        # this is restricting the NUMBER OF DECODERS, NOT the number of SPECULATORS
+        next_tasks_to_decode = []
+        for task_idx in unprocessed_task_indices:
+            task = self._get_task(task_idx)
+
+            if self.max_parallel_processes and len(next_tasks_to_decode) >= self.max_parallel_processes - len(self._active_window_progress):
+                break
+            
+            if task_idx in self._pending_decode_tasks:
+                parents = list(self._window_idx_dag.predecessors(task.window_idx))
+                if any(not (self._completed_decoding(parent_idx) or self._completed_speculation(parent_idx)) for parent_idx in parents): 
+                    continue
+                # begin decoding
+                assert not self._completed_decoding(task_idx) and task_idx not in self._active_window_progress
+
+                # if this window's dependencies are NOT speculated ones, then we always definitely want to decode this window first
+
+                # if this window's dependences ARE speculated ones, then we want to reconsider whether to decode this window or another one that has less deep speculation
+                
+
+
         while len(unprocessed_task_indices) > 0: # process tasks
             task_idx = unprocessed_task_indices.pop()
             task = self._get_task(task_idx)
@@ -670,6 +702,14 @@ class DecoderManager:
 
     # get metadata depending on our lightweight setting
     def get_data(self) -> DecoderData:
+        per_parent_inst = defaultdict(list)
+
+        for task_idx, task in enumerate(self._tasks_by_idx):
+            if task:
+                per_parent_inst[task.window.parent_instr_idx].append(task_idx)
+
+        per_parent_inst = dict(per_parent_inst)
+
         if self.lightweight_setting == 0: # returns everything
             return DecoderData(
                 num_rounds=self._current_round,
@@ -692,7 +732,9 @@ class DecoderManager:
                 num_successful_speculations=self._num_successful_speculations,
                 per_window_wasted_rounds=self._per_window_wasted_rounds,
                 per_window_poisoned=self._per_window_poisoned,
-                per_window_parent_inst={task_idx:task.window.parent_instr_idx for task_idx,task in enumerate(self._tasks_by_idx) if task}
+                per_window_parent_inst={task_idx:task.window.parent_instr_idx for task_idx,task in enumerate(self._tasks_by_idx) if task},
+                per_window_spec_acc={task_idx:round(task.window.speculation_accuracy, 2) for task_idx,task in enumerate(self._tasks_by_idx) if task},
+                per_inst_windows=per_parent_inst,
             )
         elif self.lightweight_setting == 1: # return less
             return DecoderData(
@@ -716,7 +758,9 @@ class DecoderManager:
                 num_successful_speculations=self._num_successful_speculations,
                 per_window_wasted_rounds=self._per_window_wasted_rounds,
                 per_window_poisoned=self._per_window_poisoned,
-                per_window_parent_inst={task_idx:task.window.parent_instr_idx for task_idx,task in enumerate(self._tasks_by_idx) if task}
+                per_window_parent_inst={task_idx:task.window.parent_instr_idx for task_idx,task in enumerate(self._tasks_by_idx) if task},
+                per_window_spec_acc={task_idx:round(task.window.speculation_accuracy, 2) for task_idx,task in enumerate(self._tasks_by_idx) if task},
+                per_inst_windows=per_parent_inst,
             )
         elif self.lightweight_setting == 2 or self.lightweight_setting == 3: # return even less
             return DecoderData(
@@ -740,7 +784,9 @@ class DecoderManager:
                 num_successful_speculations=self._num_successful_speculations,
                 per_window_wasted_rounds=self._per_window_wasted_rounds,
                 per_window_poisoned=self._per_window_poisoned,
-                per_window_parent_inst={task_idx:task.window.parent_instr_idx for task_idx,task in enumerate(self._tasks_by_idx) if task}
+                per_window_parent_inst={task_idx:task.window.parent_instr_idx for task_idx,task in enumerate(self._tasks_by_idx) if task},
+                per_window_spec_acc={task_idx:round(task.window.speculation_accuracy, 2) for task_idx,task in enumerate(self._tasks_by_idx) if task},
+                per_inst_windows=per_parent_inst,
             )
         else:
             raise RuntimeError('Invalid lightweight setting')

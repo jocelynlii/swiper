@@ -16,6 +16,8 @@ import swiper.plot as plotter
 import networkx as nx
 import json
 from pathlib import Path
+import csv
+import os
 
 # types for all of the simulator's parameters (detailed explanations for each parameter below)
 @dataclass
@@ -190,7 +192,7 @@ class DecodingSimulator:
         # )
 
         # might want to do this with an if-statement, but for now run it always
-        print('FULL WINDOW DAG STEP BEGIN---------------------------------')
+        # print('FULL WINDOW DAG STEP BEGIN---------------------------------')
         full_window_arr = []
         full_window_dag = None # nx.DiGraph()
         if need_full_window:
@@ -214,7 +216,7 @@ class DecodingSimulator:
                 decoder_parameters=decoder_parameters,
                 window_parameters=window_parameters
             )
-            print('\nFULL WINDOW DAG STEP END-----------------------------------\n')
+            # print('\nFULL WINDOW DAG STEP END-----------------------------------\n')
         # assert full_window_arr is not None and full_window_dag is not None
         # print("full window arr ", full_window_arr)
         # print("full window dag ", full_window_dag)
@@ -275,26 +277,26 @@ class DecodingSimulator:
             if clock_timeout is not None and dt.datetime.now() > start_time + clock_timeout:
                 self.failed = True
         
-        # # print window info
-        print("all windows ", len(self._window_manager.all_windows)) # , " ", self._window_manager.all_windows
-        print("Nodes:")
-        for n, attrs in self._window_manager.window_dag.nodes(data=True):
-            print(f"  {n}: {attrs}")
+        # # # print window info
+        # print("all windows ", len(self._window_manager.all_windows)) # , " ", self._window_manager.all_windows
+        # print("Nodes:")
+        # for n, attrs in self._window_manager.window_dag.nodes(data=True):
+        #     print(f"  {n}: {attrs}")
 
-        print("\nEdges:")
-        for u, v, attrs in self._window_manager.window_dag.edges(data=True):
-            print(f"  {u} -> {v}: {attrs}")
+        # print("\nEdges:")
+        # for u, v, attrs in self._window_manager.window_dag.edges(data=True):
+        #     print(f"  {u} -> {v}: {attrs}")
 
-        # # print instr info
-        print("all insts ", len(self._device_manager.schedule_dag)) # , " ", self._device_manager.schedule_dag
-        # print("all insts schedule", len(self._device_manager.schedule_instructions), " ", self._device_manager.schedule_instructions)
-        print("Nodes:")
-        for n, attrs in self._device_manager.schedule_dag.nodes(data=True):
-            print(f"  {n}: {attrs}")
+        # # # print instr info
+        # print("all insts ", len(self._device_manager.schedule_dag)) # , " ", self._device_manager.schedule_dag
+        # # print("all insts schedule", len(self._device_manager.schedule_instructions), " ", self._device_manager.schedule_instructions)
+        # print("Nodes:")
+        # for n, attrs in self._device_manager.schedule_dag.nodes(data=True):
+        #     print(f"  {n}: {attrs}")
 
-        print("\nEdges:")
-        for u, v, attrs in self._device_manager.schedule_dag.edges(data=True):
-            print(f"  {u} -> {v}: {attrs}")
+        # print("\nEdges:")
+        # for u, v, attrs in self._device_manager.schedule_dag.edges(data=True):
+        #     print(f"  {u} -> {v}: {attrs}")
 
 
         # og print stuff
@@ -309,20 +311,7 @@ class DecodingSimulator:
             # pbar_i.close()
 
         _, _, device_data, _, decoder_data = self.get_data()
-        print("decoder data end ", decoder_data.num_failed_speculations, " ", decoder_data.num_discarded_decodes)
-        print("total wasted decode volume ", decoder_data.wasted_decode_volume)
-        if decoder_data.num_rounds != device_data.num_rounds:
-            print("WRONG ROUNDS WRONG ROUNDS")
-        print("total number of rounds ", decoder_data.num_rounds)
-        print("total number of rounds device data ", device_data.num_rounds)
-        print("window decoding times start ", decoder_data.window_decoding_start_times)
-        print("window decoding times end ", decoder_data.window_decoding_completion_times)
-        print("per window wasted rounds ", decoder_data.per_window_wasted_rounds)
-        print("per window poisoned ", decoder_data.per_window_poisoned)
-        print("per window parent insts ", decoder_data.per_window_parent_inst)
-        print("num t gates", device_data.num_t_gates)
-        print("conditional wait times", device_data.conditioned_decode_wait_times)
-        print("avg conditional wait times", device_data.avg_conditioned_decode_wait_time)
+        
         
 
         count_t_windows = 0
@@ -342,13 +331,59 @@ class DecodingSimulator:
             #         if self._device_manager.schedule_instructions[inst].instruction.name == "IDLE" and not self._device_manager.schedule_instructions[inst].instruction.t_gate_bool:
             #             count_t_windows = count_t_windows + 1
 
-        print("non t windows", count_t_windows)
-        print("unwanted idle windows", unwanted_idle_windows)
-        print("rounds with only unwanted idles", self._decoding_manager._unwanted_idle_rounds)
-        print("total decoder volume", self._decoding_manager._decode_processor_spacetime_volume)
-        print("total num mispredictions", self._decoding_manager._num_failed_speculations)
+        # print("decoder data end ", decoder_data.num_failed_speculations) # , " ", decoder_data.num_discarded_decodes
+        # print("total wasted decode volume ", decoder_data.wasted_decode_volume)
+        # # if decoder_data.num_rounds != device_data.num_rounds:
+        # #     print("WRONG ROUNDS WRONG ROUNDS")
+        # print("total number of rounds ", decoder_data.num_rounds)
+        # print("total number of rounds device data ", device_data.num_rounds)
+        # # print("window decoding times start ", decoder_data.window_decoding_start_times)
+        # # print("window decoding times end ", decoder_data.window_decoding_completion_times)
+        # # print("per window wasted rounds ", decoder_data.per_window_wasted_rounds)
+        # # print("per window poisoned ", decoder_data.per_window_poisoned)
+        # # print("per window parent insts ", decoder_data.per_window_parent_inst)
+        # print("conditional wait times", device_data.conditioned_decode_wait_times)
+        # print("avg conditional wait times", device_data.avg_conditioned_decode_wait_time)
+        # print("num t gates", device_data.num_t_gates)
+        #     # print("non t windows", count_t_windows)
+        # print("unwanted idle windows", unwanted_idle_windows)
+        # print("rounds with only unwanted idles", self._decoding_manager._unwanted_idle_rounds)
+        # print("total decoder volume", self._decoding_manager._decode_processor_spacetime_volume)
+        # print("total num mispredictions", self._decoding_manager._num_failed_speculations)
+
+       
 
         if need_full_window: # only need to write to file after the second run (not the first run that generates the full window dag)
+            row = {
+                "decoder data end": decoder_data.num_failed_speculations,
+                "total wasted decode volume": decoder_data.wasted_decode_volume,
+                "total number of rounds": decoder_data.num_rounds,
+                "total number of rounds device data": device_data.num_rounds,
+                "per inst windows": decoder_data.per_inst_windows,
+                "per window speculation acc": decoder_data.per_window_spec_acc,
+                "conditional wait times": str(device_data.conditioned_decode_wait_times),
+                "avg conditional wait times": device_data.avg_conditioned_decode_wait_time,
+                "unwanted idle windows": unwanted_idle_windows,
+                "rounds with only unwanted idles": self._decoding_manager._unwanted_idle_rounds,
+                "total decoder volume": self._decoding_manager._decode_processor_spacetime_volume,
+                "total num mispredictions": self._decoding_manager._num_failed_speculations,
+            }
+
+            filename = "results.csv"
+            file_exists = os.path.isfile(filename)
+
+            with open(filename, "a", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=row.keys())
+
+                if not file_exists:
+                    writer.writeheader()
+
+                writer.writerow(row)
+
+
+            
+
+
             window_parameters_file = {}
             window_metadata_file_ro = []
             decoding_latency_fn_str = ""
@@ -490,11 +525,11 @@ class DecodingSimulator:
         self.failed = False
         self._device_manager = DeviceManager(distance, schedule, lightweight_setting=lightweight_setting, rng=rng)
         if scheduling_method == 'sliding':
-            self._window_manager = SlidingWindowManager(WindowBuilder(distance, lightweight_setting=lightweight_setting, decoder_parameters=decoder_parameters_dict, window_parameters=window_parameters_dict), lightweight_setting=lightweight_setting, window_parameters=window_parameters_dict)
+            self._window_manager = SlidingWindowManager(WindowBuilder(distance, lightweight_setting=lightweight_setting, decoder_parameters=decoder_parameters_dict, window_parameters=window_parameters_dict, schedule_insts=self._device_manager.schedule_instructions), lightweight_setting=lightweight_setting, window_parameters=window_parameters_dict)
         elif scheduling_method == 'parallel':
-            self._window_manager = ParallelWindowManager(WindowBuilder(distance, lightweight_setting=lightweight_setting, decoder_parameters=decoder_parameters_dict, window_parameters=window_parameters_dict), lightweight_setting=lightweight_setting, window_parameters=window_parameters_dict)
+            self._window_manager = ParallelWindowManager(WindowBuilder(distance, lightweight_setting=lightweight_setting, decoder_parameters=decoder_parameters_dict, window_parameters=window_parameters_dict, schedule_insts=self._device_manager.schedule_instructions), lightweight_setting=lightweight_setting, window_parameters=window_parameters_dict)
         elif scheduling_method == 'aligned':
-            self._window_manager = TAlignedWindowManager(WindowBuilder(distance, lightweight_setting=lightweight_setting, decoder_parameters=decoder_parameters_dict, window_parameters=window_parameters_dict), lightweight_setting=lightweight_setting, window_parameters=window_parameters_dict)
+            self._window_manager = TAlignedWindowManager(WindowBuilder(distance, lightweight_setting=lightweight_setting, decoder_parameters=decoder_parameters_dict, window_parameters=window_parameters_dict, schedule_insts=self._device_manager.schedule_instructions), lightweight_setting=lightweight_setting, window_parameters=window_parameters_dict)
         else:
             raise ValueError(f"Unknown scheduling method: {scheduling_method}")
         self._decoding_manager = DecoderManager(
@@ -578,9 +613,9 @@ class DecodingSimulator:
         # decoding manager now updates decoding with these new windows and new window dag
         self._decoding_manager.update_decoding(newly_constructed_windows, purged_indices, self._window_manager.window_dag)
 
-        print("all active insts", self._device_manager._active_instructions)
-        print("all active windows", self._decoding_manager._active_window_progress)
-        print("all speculating windows", self._decoding_manager._active_speculation_progress)
+        # print("all active insts", self._device_manager._active_instructions)
+        # print("all active windows", self._decoding_manager._active_window_progress)
+        # print("all speculating windows", self._decoding_manager._active_speculation_progress)
 
     # Done when we either fail, or we have completed decoding every single window
     def is_done(self) -> bool:

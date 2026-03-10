@@ -167,8 +167,8 @@ class RegularTSchedule:
             # schedule.S((2,2), injection_patch, idx, t_gate_bool=True)
             
         schedule.discard([(0,0)])
-        schedule.discard([(1,1)])
-        schedule.discard([(2,2)])
+        # schedule.discard([(1,1)])
+        # schedule.discard([(2,2)])
 
         self.schedule = schedule
 
@@ -206,6 +206,57 @@ class RegularTScheduleWithInBetween:
             schedule.idle([(2,1)], 20)
             
         schedule.discard([(0,0)])
+
+        self.schedule = schedule
+
+class ParallelTSchedule:
+    """Simple schedule that injects a T gate on one patch for a specified number
+    of rounds, with a specified number of idle rounds between each T gate.
+    Alternates T state creation between two adjacent patches.
+    """
+    def __init__(self, num_Ts: int, idle_between_Ts: int):
+        """Builds the schedule.
+        
+        Args:
+            num_Ts: Number of T gates to inject.
+            idle_between_Ts: Number of idle rounds between each T gate.
+        """
+        schedule = LatticeSurgerySchedule(generate_dag_incrementally=True)
+        prev_injection_flag = False
+        for i in range(num_Ts):
+            schedule.idle([(0,0)], idle_between_Ts)
+
+            injection_patch = (0,1) if prev_injection_flag else (1,0)
+            schedule.inject_T([injection_patch], True)
+            prev_injection_flag = not prev_injection_flag
+            idx = len(schedule)
+            schedule.merge([(0,0), injection_patch], [], t_gate_bool=True)
+            schedule.discard([injection_patch], t_gate_bool=True)
+            schedule.S((0,0), injection_patch, idx, t_gate_bool=True)
+
+            schedule.idle([(1,1)], idle_between_Ts)
+
+            injection_patch = (1,2) if prev_injection_flag else (2,1)
+            schedule.inject_T([injection_patch], True)
+            prev_injection_flag = not prev_injection_flag
+            idx = len(schedule)
+            schedule.merge([(1,1), injection_patch], [], t_gate_bool=True)
+            schedule.discard([injection_patch], t_gate_bool=True)
+            schedule.S((1,1), injection_patch, idx, t_gate_bool=True)
+
+            schedule.idle([(2,2)], idle_between_Ts)
+
+            injection_patch = (2,3) if prev_injection_flag else (3,2)
+            schedule.inject_T([injection_patch], True)
+            prev_injection_flag = not prev_injection_flag
+            idx = len(schedule)
+            schedule.merge([(2,2), injection_patch], [], t_gate_bool=True)
+            schedule.discard([injection_patch], t_gate_bool=True)
+            schedule.S((2,2), injection_patch, idx, t_gate_bool=True)
+            
+        schedule.discard([(0,0)])
+        schedule.discard([(1,1)])
+        schedule.discard([(2,2)])
 
         self.schedule = schedule
 
