@@ -548,7 +548,7 @@ class DecoderManager:
 
             return maxDepth
 
-    def first_distance_where_all_flagged(self, start):
+    def first_distance_where_all_flagged(self, start, max_depth=None):
         visited = {start}
         frontier = {start}
         dist = -1 # 0
@@ -564,6 +564,9 @@ class DecoderManager:
 
             dist += 1
 
+            if max_depth is not None and dist > max_depth:
+                return -2
+
             if not next_frontier:
                 #return None
                 return dist
@@ -573,7 +576,7 @@ class DecoderManager:
 
             frontier = next_frontier
         
-    def get_speculation_depth(self, task_idx, next_tasks_to_decode) -> int:
+    def get_speculation_depth(self, task_idx, next_tasks_to_decode, max_depth = None) -> int:
         task = self._get_task(task_idx)
 
         if task_idx in self._pending_decode_tasks:
@@ -583,9 +586,10 @@ class DecoderManager:
             if any(not (self._completed_decoding(parent_idx) or self._completed_speculation(parent_idx)) for parent_idx in parents): 
                 return
             
-            depth = self.first_distance_where_all_flagged(task_idx)
+            depth = self.first_distance_where_all_flagged(task_idx, max_depth)
+            if depth != -2:
             # if depth:
-            next_tasks_to_decode[depth].append(task_idx)
+                next_tasks_to_decode[depth].append(task_idx)
             # else:
             #     print("NONE VERIFIED")
 
@@ -877,7 +881,7 @@ class DecoderManager:
                     
                     if len(next_tasks) >= self.max_parallel_processes - len(self._active_window_progress):
                         break
-                # print(next_tasks_to_decode)
+                print(next_tasks_to_decode)
             
 
         # # TODO ADDED: initially iterate through unprocessed_task_indices and get the most parallel ones to launch based on max parallel processes
@@ -995,7 +999,7 @@ class DecoderManager:
                     if len(self._per_window_poisoned) <= task.window_idx:
                         self._per_window_poisoned += [0] * (task.window_idx-len(self._per_window_poisoned)+1)
                     # print("decoding time fcn result ", x)
-                    # print(task_idx)
+                    print(task_idx)
                     self._active_window_progress[task_idx] = x # self.decoding_time_function(task.window.total_spacetime_volume()) # set the remaining decoding time for this task (which rn, is the total decoding time for this window)
                     task.used_parent_speculations = {}
                     for parent_idx in parents: # check for each parent, whether we're using their speculated result or their actual verified result
@@ -1062,7 +1066,7 @@ class DecoderManager:
                             # add to unprocessed (but rdy to start processing) task indices all of this window's successors (which depended on this window), if these successors have a task and have not completed decoding
                             # TODO what if these windows have multiple dependencies
                             unprocessed_task_indices |= {w_idx for w_idx in self._window_idx_dag.successors(task.window_idx) if not (self._get_task_or_none(w_idx) is None or self._get_task(w_idx).completed_decoding)}
-        # print(self._active_window_progress)
+        print(self._active_window_progress)
 
 
     # check if a task is done completed decoding or not
