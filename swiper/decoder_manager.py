@@ -5,7 +5,7 @@ import networkx as nx
 import itertools
 from swiper.window_builder import DecodingWindow
 from swiper.lattice_surgery_schedule import Instruction, Duration
-from collections import defaultdict
+from collections import defaultdict, deque
 
 @dataclass
 class DecoderData:
@@ -266,6 +266,7 @@ class DecoderManager:
                         # print("rhs if speculate ", y, " wind acc ", task.window.speculation_accuracy, " acc mod ", spec_acc_modifier, " touch face ", self._get_task(successor_idx).window.count_touching_faces(self._get_task(task_idx).window), " succ idx ", successor_idx, " task idx ", task_idx)
                         if x > y: # x > (1-((1-task.window.speculation_accuracy)*spec_acc_modifier))**self._get_task(successor_idx).window.count_touching_faces(self._get_task(task_idx).window): # instd of task.window_speculation_accuracy
                             # Missed speculation
+                            # print("misspeculate", successor_idx)
                             self._num_failed_speculations += 1
                             assert successor.used_parent_speculations[task_idx] # asser that this successor did use the parent's (curr task_idx's) speculation result 
                             poisoned_speculations.append(successor_idx)
@@ -498,10 +499,10 @@ class DecoderManager:
         #     or (task.window.speculation_accuracy > 0.8 and self._instructions[sorted(task.window.parent_instr_idx)[0]].t_gate_bool and self._instructions[sorted(task.window.parent_instr_idx)[0]].group_name != "COND_S")): # 0.5  task.window.speculation_accuracy > 0
         #     self._pending_speculate_tasks.add(task_idx) # add anew to pending speculate tasks list
 
-        # self._pending_speculate_tasks.add(task_idx)
+        self._pending_speculate_tasks.add(task_idx)
 
-        if ((task.window.speculation_accuracy > 0.8)): # 0.5  task.window.speculation_accuracy > 0
-            self._pending_speculate_tasks.add(task_idx) # add anew to pending speculate tasks list
+        # if ((task.window.speculation_accuracy > 0.8)): # 0.5  task.window.speculation_accuracy > 0
+        #     self._pending_speculate_tasks.add(task_idx) # add anew to pending speculate tasks list
         assert task_idx not in self._active_speculation_progress and task.speculation_start_time == -1 and task.speculation_completion_time == -1 and not task.completed_speculation
         return task
 
@@ -531,7 +532,7 @@ class DecoderManager:
                     self._reset_decode_task(child_idx) # reset decode task of child that finished decoding because it's invalid now
         return poisoned_indices # return a list of all reset descendant tasks (not including self) (TODO but I'm pretty sure it's always empty)
     
-    def get_speculation_depth(self, parent_idx, depth) -> int:
+    def get_speculation_depth_OLD(self, parent_idx, depth) -> int:
         task = self._get_task(parent_idx)
         parents = list(self._window_idx_dag.predecessors(task.window_idx))
         maxDepth = depth
@@ -546,6 +547,82 @@ class DecoderManager:
                         maxDepth = depth1
 
             return maxDepth
+
+    def first_distance_where_all_flagged(self, start):
+        visited = {start}
+        frontier = {start}
+        dist = -1 # 0
+
+        while frontier:
+            next_frontier = set()
+
+            for node in frontier:
+                for pred in self._window_idx_dag.predecessors(node):
+                    if pred not in visited:
+                        visited.add(pred)
+                        next_frontier.add(pred)
+
+            dist += 1
+
+            if not next_frontier:
+                #return None
+                return dist
+
+            if all(self._is_verified_task(n) for n in next_frontier):
+                return dist
+
+            frontier = next_frontier
+        
+    def get_speculation_depth(self, task_idx, next_tasks_to_decode) -> int:
+        task = self._get_task(task_idx)
+
+        if task_idx in self._pending_decode_tasks:
+            parents = list(self._window_idx_dag.predecessors(task.window_idx))
+
+            # no dependencies (regardless of speculated or not) passed to me yet, so I'm not even ready to decode yet even with speculated deps
+            if any(not (self._completed_decoding(parent_idx) or self._completed_speculation(parent_idx)) for parent_idx in parents): 
+                return
+            
+            depth = self.first_distance_where_all_flagged(task_idx)
+            # if depth:
+            next_tasks_to_decode[depth].append(task_idx)
+            # else:
+            #     print("NONE VERIFIED")
+
+            # if all(self._is_verified_task(parent_idx) for parent_idx in parents):
+            #     next_tasks_to_decode[depth].append(task_idx)
+            #     return
+            # else:
+            #     parent_done = True
+            #     for parent_idx in parents:
+            #         parent_task = self._get_task(parent_idx)
+            #         parents_parents = list(self._window_idx_dag.predecessors(parent_task.window_idx))
+
+            #         if not all(self._is_verified_task(parent_idx) for parent_idx in parents_parents):
+            #             parent_done = False
+            #             break
+
+            #     if parent_done:
+            #         next_tasks_to_decode[1].append(task_idx)
+            #     else: # added only below
+            #         parent_parent_done = True
+            #         for parent_idx in parents:
+            #             parent_task = self._get_task(parent_idx)
+            #             parents_parents = list(self._window_idx_dag.predecessors(parent_task.window_idx))
+
+            #             for parent_parent_idx in parents_parents:
+            #                 parent_parent_task = self._get_task(parent_parent_idx)
+            #                 parents_parents_parents = list(self._window_idx_dag.predecessors(parent_parent_task.window_idx))
+
+            #                 if not all(self._is_verified_task(parent_idx) for parent_idx in parents_parents_parents):
+            #                     parent_parent_done = False
+            #                     break
+
+            #             if not parent_parent_done:
+            #                 break
+
+            #         if parent_parent_done:
+            #             next_tasks_to_decode[2].append(task_idx)
 
 
     def update_decoding(self, new_windows: list[DecodingWindow], purged_indices: list[int], window_idx_dag: nx.DiGraph) -> None:
@@ -576,12 +653,12 @@ class DecoderManager:
                 #     or (task.window.speculation_accuracy > 0.8 and self._instructions[sorted(task.window.parent_instr_idx)[0]].t_gate_bool and self._instructions[sorted(task.window.parent_instr_idx)[0]].group_name != "COND_S")) and task.window.window_idx in copy_new_task_indices: # .5
                 #     self._pending_speculate_tasks.add(task.window.window_idx)
                 #     copy_new_task_indices.remove(task.window.window_idx)
-                if ((task.window.speculation_accuracy > 0.8)) and task.window.window_idx in copy_new_task_indices: # .5
-                    self._pending_speculate_tasks.add(task.window.window_idx)
-                    copy_new_task_indices.remove(task.window.window_idx)
-                # if task.window.window_idx in copy_new_task_indices: # .5
+                # if ((task.window.speculation_accuracy > 0.8)) and task.window.window_idx in copy_new_task_indices: # .5
                 #     self._pending_speculate_tasks.add(task.window.window_idx)
                 #     copy_new_task_indices.remove(task.window.window_idx)
+                if task.window.window_idx in copy_new_task_indices: # .5
+                    self._pending_speculate_tasks.add(task.window.window_idx)
+                    copy_new_task_indices.remove(task.window.window_idx)
         
         # print("pending decode tasks2 ", self._pending_decode_tasks)
         # get the length needed for the tasks_by_idx list, which stores the number of tasks per window index (so we want to get the maximum window index to get the length of this list)
@@ -739,70 +816,58 @@ class DecoderManager:
         # THIS ONE BELOW IS THE ONE -- after checking with verified tasks, this is the one that follows the expected pattern!!!   
         if self.max_parallel_processes:
             for task_idx in unprocessed_task_indices:
-                if task_idx in self._active_window_progress:
-                    continue
+                # if task_idx in self._active_window_progress:
+                #     continue
 
-                task = self._get_task(task_idx)
+                self.get_speculation_depth(task_idx, next_tasks_to_decode)
 
-                # if len(next_tasks_to_decode) >= self.max_parallel_processes - len(self._active_window_progress):
-                #     break
+                # task = self._get_task(task_idx)
 
-                if task_idx in self._pending_decode_tasks:
-                    parents = list(self._window_idx_dag.predecessors(task.window_idx))
-                    if any(not (self._completed_decoding(parent_idx) or self._completed_speculation(parent_idx)) for parent_idx in parents): 
-                        continue
+                # # if len(next_tasks_to_decode) >= self.max_parallel_processes - len(self._active_window_progress):
+                # #     break
 
-                    if all(self._is_verified_task(parent_idx) for parent_idx in parents):
-                        next_tasks_to_decode[0].append(task_idx)
-                        continue
-                    else:
-                        parent_done = True
-                        for parent_idx in parents:
-                            parent_task = self._get_task(parent_idx)
-                            parents_parents = list(self._window_idx_dag.predecessors(parent_task.window_idx))
+                # if task_idx in self._pending_decode_tasks:
+                #     parents = list(self._window_idx_dag.predecessors(task.window_idx))
+                #     if any(not (self._completed_decoding(parent_idx) or self._completed_speculation(parent_idx)) for parent_idx in parents): 
+                #         continue
 
-                            if not all(self._is_verified_task(parent_idx) for parent_idx in parents_parents):
-                                parent_done = False
-                                break
+                #     if all(self._is_verified_task(parent_idx) for parent_idx in parents):
+                #         next_tasks_to_decode[0].append(task_idx)
+                #         continue
+                #     else:
+                #         parent_done = True
+                #         for parent_idx in parents:
+                #             parent_task = self._get_task(parent_idx)
+                #             parents_parents = list(self._window_idx_dag.predecessors(parent_task.window_idx))
 
-                        if parent_done:
-                            next_tasks_to_decode[1].append(task_idx)
-                        else: # added only below
-                            parent_parent_done = True
-                            for parent_idx in parents:
-                                parent_task = self._get_task(parent_idx)
-                                parents_parents = list(self._window_idx_dag.predecessors(parent_task.window_idx))
+                #             if not all(self._is_verified_task(parent_idx) for parent_idx in parents_parents):
+                #                 parent_done = False
+                #                 break
 
-                                for parent_parent_idx in parents_parents:
-                                    parent_parent_task = self._get_task(parent_parent_idx)
-                                    parents_parents_parents = list(self._window_idx_dag.predecessors(parent_parent_task.window_idx))
+                #         if parent_done:
+                #             next_tasks_to_decode[1].append(task_idx)
+                #         else: # added only below
+                #             parent_parent_done = True
+                #             for parent_idx in parents:
+                #                 parent_task = self._get_task(parent_idx)
+                #                 parents_parents = list(self._window_idx_dag.predecessors(parent_task.window_idx))
 
-                                    if not all(self._is_verified_task(parent_idx) for parent_idx in parents_parents_parents):
-                                        parent_parent_done = False
-                                        break
+                #                 for parent_parent_idx in parents_parents:
+                #                     parent_parent_task = self._get_task(parent_parent_idx)
+                #                     parents_parents_parents = list(self._window_idx_dag.predecessors(parent_parent_task.window_idx))
 
-                                if not parent_parent_done:
-                                    break
+                #                     if not all(self._is_verified_task(parent_idx) for parent_idx in parents_parents_parents):
+                #                         parent_parent_done = False
+                #                         break
 
-                            if parent_parent_done:
-                                next_tasks_to_decode[2].append(task_idx)
+                #                 if not parent_parent_done:
+                #                     break
 
-            # if next_tasks_to_decode:
-            #     for dist in sorted(next_tasks_to_decode):
-            #         val = next_tasks_to_decode[dist]
-            #         for task in val:
-            #             next_tasks.append(task)
-
-            #             if len(next_tasks) >= self.max_parallel_processes - len(self._active_window_progress):
-            #                 break
-                    
-            #         if len(next_tasks) >= self.max_parallel_processes - len(self._active_window_progress):
-            #             break
-            #     print(next_tasks_to_decode)
-                # print(next_tasks)
+                #             if parent_parent_done:
+                #                 next_tasks_to_decode[2].append(task_idx)
 
             if next_tasks_to_decode:
-                for dist in sorted(next_tasks_to_decode, reverse=True):
+                for dist in sorted(next_tasks_to_decode): # , reverse=True
                     val = next_tasks_to_decode[dist]
                     for task in val:
                         next_tasks.append(task)
@@ -997,7 +1062,9 @@ class DecoderManager:
                             # add to unprocessed (but rdy to start processing) task indices all of this window's successors (which depended on this window), if these successors have a task and have not completed decoding
                             # TODO what if these windows have multiple dependencies
                             unprocessed_task_indices |= {w_idx for w_idx in self._window_idx_dag.successors(task.window_idx) if not (self._get_task_or_none(w_idx) is None or self._get_task(w_idx).completed_decoding)}
-    
+        # print(self._active_window_progress)
+
+
     # check if a task is done completed decoding or not
     def _completed_decoding(self, task_idx: int) -> bool:
         task = self._get_task_or_none(task_idx)
