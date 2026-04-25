@@ -74,7 +74,13 @@ class DecodingSimulator:
             need_full_window: bool = None,
             decoder_parameters: str = None,
             # full_window_dag: nx.DiGraph = None
-            window_parameters: str | dict | None = None
+            window_parameters: str | dict | None = None,
+            filename: str = "dummy",
+            slow_gate: bool = False,
+            slow_gate_mult: int = None,
+            spec_strat: str = "default",
+            max_depth: int = None,
+            spec_depth_threshold: int = None,
         ) -> tuple[bool, SimulatorParams, DeviceData, WindowData, DecoderData]:
         """TODO
         
@@ -154,7 +160,7 @@ class DecodingSimulator:
                 need_full_window=False, # TODO: ARE U SURE THIS SHLD BE FALSE? I THINK SO BUT NOT SURE
                 decoder_parameters=decoder_parameters
             )
-            prediction_success, _, pred_device_data, _, pred_decode_data, _, _  = prediction_data
+            prediction_success, _, pred_device_data, _, pred_decode_data  = prediction_data # , _, _
             assert prediction_success
             # get the max number of proceses from executing the equation to get this number, as defined in the paper
             max_parallel_processes = pred_decode_data.max_parallel_decoders + math.ceil((pred_decode_data.decode_process_volume / pred_decode_data.num_rounds) * (1 - speculation_accuracy))
@@ -241,7 +247,12 @@ class DecodingSimulator:
             processor_prediction_results=processor_prediction_results,
             full_window_dag=full_window_dag,
             decoder_parameters=decoder_parameters,
-            window_parameters=window_parameters
+            window_parameters=window_parameters,
+            slow_gate=slow_gate,
+            slow_gate_mult=slow_gate_mult,
+            spec_strat=spec_strat,
+            max_depth=max_depth,
+            spec_depth_threshold=spec_depth_threshold,
         )
         # make sure we have all the required managers
         assert self._device_manager is not None
@@ -313,18 +324,21 @@ class DecodingSimulator:
         _, _, device_data, _, decoder_data = self.get_data()
         
         
-
         count_t_windows = 0
         unwanted_idle_windows = 0
+        # if scheduling_method != "parallel":
+            
         for idx, val in enumerate(self._window_manager.all_windows):
-            for inst in val.parent_instr_idx:
-                if len(val.parent_instr_idx) == 1:
-                    if self._device_manager.schedule_instructions[inst].instruction.name == "IDLE" and not self._device_manager.schedule_instructions[inst].instruction.t_gate_bool:
-                        count_t_windows = count_t_windows + 1
+            # print("simulator idx, val", idx, val)
+            if val is not None:
+                for inst in val.parent_instr_idx:
+                    if len(val.parent_instr_idx) == 1:
+                        if self._device_manager.schedule_instructions[inst].instruction.name == "IDLE" and not self._device_manager.schedule_instructions[inst].instruction.t_gate_bool:
+                            count_t_windows = count_t_windows + 1
 
-                if inst == -1:
-                    unwanted_idle_windows = unwanted_idle_windows + 1
-                    break
+                    if inst == -1:
+                        unwanted_idle_windows = unwanted_idle_windows + 1
+                        break
 
             # if len(val.parent_instr_idx) == 1:
             #     for inst in val.parent_instr_idx:
@@ -365,11 +379,34 @@ class DecodingSimulator:
                 "avg conditional wait times": device_data.avg_conditioned_decode_wait_time,
                 "unwanted idle windows": unwanted_idle_windows,
                 "rounds with only unwanted idles": self._decoding_manager._unwanted_idle_rounds,
+                "rounds with any number of unwanted idles": self._decoding_manager._unwanted_idle_rounds_any,
+                "unwanted idles volume": self._decoding_manager._unwanted_idle_rounds_volume,
                 "total decoder volume": self._decoding_manager._decode_processor_spacetime_volume,
                 "total num mispredictions": self._decoding_manager._num_failed_speculations,
+                "total num successful predictions": self._decoding_manager._num_successful_speculations,
+                "total num speculations": self._decoding_manager._num_successful_speculations+self._decoding_manager._num_failed_speculations,
+                "average speculation depth": decoder_data.average_speculation_depth,
+                "total num windows": decoder_data.num_completed_windows,
+                "avg conditional wait time (not volume)": device_data.avg_conditioned_decode_wait_time_individual,
+                "spec depth calc time": self._decoding_manager.total_spec_depth_calc_time,
+                "total backlog": decoder_data.total_backlog,
+                "average backlog": decoder_data.average_backlog,
+                "processor idle rounds": decoder_data.processor_idle_rounds,
+                "processor idle percent": decoder_data.processor_idle_percent,
+                "average active windows": decoder_data.average_active_windows,
             }
 
-            filename = "results.csv"
+            # filename = f"results_superconducting_{max_parallel_processes}_0.8_new.csv" # _{max_parallel_processes}
+            # filename = f"results_superconducting_{max_parallel_processes}_{speculation_accuracy}_specaccvary.csv" # _{max_parallel_processes}
+            # filename = f"results_slow_{max_parallel_processes}_{speculation_accuracy}_more.csv" # _{max_parallel_processes}
+            # filename = f"results_fast_{max_parallel_processes}_{speculation_accuracy}_shallow_more_ui2.csv"
+            # filename = f"results_slow_{max_parallel_processes}_{speculation_accuracy}_shallow_more_ui2.csv"
+
+            # filename = f"results_sequential_fast_{max_parallel_processes}_{speculation_accuracy}_shallow.csv"
+            # filename = f"results_sequential_slow_{max_parallel_processes}_{speculation_accuracy}_shallow.csv"
+            # filename = f"results_sequential_fast_{max_parallel_processes}_{speculation_accuracy}_shallow.csv"
+            # filename = f"results_sequential_slow_{max_parallel_processes}_{speculation_accuracy}_deep.csv"
+            # filename = f"results_dummy.csv"
             file_exists = os.path.isfile(filename)
 
             with open(filename, "a", newline="") as f:
@@ -387,77 +424,78 @@ class DecodingSimulator:
             window_parameters_file = {}
             window_metadata_file_ro = []
             decoding_latency_fn_str = ""
-            for idx, val in enumerate(self._window_manager.all_windows):
-                # try:
-                #     decoding_latency_fn_str = inspect.getsource(val.decoding_time_fn)
-                # except Exception as e:
-                #     print(f'Failed to get source of decoding_latency_fn: {e}')
-                #     decoding_latency_fn_str = None
+            if scheduling_method != "parallel" and scheduling_method != "aligned":
+                for idx, val in enumerate(self._window_manager.all_windows):
+                    # try:
+                    #     decoding_latency_fn_str = inspect.getsource(val.decoding_time_fn)
+                    # except Exception as e:
+                    #     print(f'Failed to get source of decoding_latency_fn: {e}')
+                    #     decoding_latency_fn_str = None
 
-                window_key = {}
-                cmt_rgn_list = []
-                buffer_rgn_list = []
+                    window_key = {}
+                    cmt_rgn_list = []
+                    buffer_rgn_list = []
+                    
+                    # construct syndrome round dicts
+                    for cmt_rgn in val.commit_region:
+                        cmt_rgn_dict = {}
+                        cmt_rgn_dict['patch'] = list(cmt_rgn.patch) # need convert tuple to list for json
+                        cmt_rgn_dict['duration'] = cmt_rgn.duration
+                        cmt_rgn_dict['num_spatial_boundaries'] = cmt_rgn.num_spatial_boundaries
+                        cmt_rgn_dict['initialized_patch'] = cmt_rgn.initialized_patch
+                        cmt_rgn_dict['discard_after'] = cmt_rgn.discard_after
+                        cmt_rgn_list.append(cmt_rgn_dict)
+
+                    for buffer_rgn in val.buffer_regions:
+                        buffer_rgn_dict = {}
+                        buffer_rgn_dict['patch'] = list(buffer_rgn.patch) # need convert tuple to list for json
+                        buffer_rgn_dict['duration'] = buffer_rgn.duration
+                        buffer_rgn_dict['num_spatial_boundaries'] = buffer_rgn.num_spatial_boundaries
+                        buffer_rgn_dict['initialized_patch'] = buffer_rgn.initialized_patch
+                        buffer_rgn_dict['discard_after'] = buffer_rgn.discard_after
+                        buffer_rgn_list.append(buffer_rgn_dict)
+
+                    parent_inst_list = list(val.parent_instr_idx)
+
+                    window_key['commit_region'] = cmt_rgn_list
+                    window_key['buffer_regions'] = buffer_rgn_list
+                    window_key['parent_instr_idx'] = parent_inst_list
+                    window_key['constructed'] = val.constructed
                 
-                # construct syndrome round dicts
-                for cmt_rgn in val.commit_region:
-                    cmt_rgn_dict = {}
-                    cmt_rgn_dict['patch'] = list(cmt_rgn.patch) # need convert tuple to list for json
-                    cmt_rgn_dict['duration'] = cmt_rgn.duration
-                    cmt_rgn_dict['num_spatial_boundaries'] = cmt_rgn.num_spatial_boundaries
-                    cmt_rgn_dict['initialized_patch'] = cmt_rgn.initialized_patch
-                    cmt_rgn_dict['discard_after'] = cmt_rgn.discard_after
-                    cmt_rgn_list.append(cmt_rgn_dict)
-
-                for buffer_rgn in val.buffer_regions:
-                    buffer_rgn_dict = {}
-                    buffer_rgn_dict['patch'] = list(buffer_rgn.patch) # need convert tuple to list for json
-                    buffer_rgn_dict['duration'] = buffer_rgn.duration
-                    buffer_rgn_dict['num_spatial_boundaries'] = buffer_rgn.num_spatial_boundaries
-                    buffer_rgn_dict['initialized_patch'] = buffer_rgn.initialized_patch
-                    buffer_rgn_dict['discard_after'] = buffer_rgn.discard_after
-                    buffer_rgn_list.append(buffer_rgn_dict)
-
-                parent_inst_list = list(val.parent_instr_idx)
-
-                window_key['commit_region'] = cmt_rgn_list
-                window_key['buffer_regions'] = buffer_rgn_list
-                window_key['parent_instr_idx'] = parent_inst_list
-                window_key['constructed'] = val.constructed
-            
-                if decoding_latency_fn_str is not None:
-                    window_parameters_file[idx] = {
-                        'window_info': window_key,
-                        'edit_parameters': {
-                            'speculation_accuracy': val.speculation_accuracy,
-                            'speculation_time': val.speculation_time,
-                            'decoding_time_fn': val.decoding_time_fn_str # decoding_latency_fn_str.split("=")[1][1:-1]
+                    if decoding_latency_fn_str is not None:
+                        window_parameters_file[idx] = {
+                            'window_info': window_key,
+                            'edit_parameters': {
+                                'speculation_accuracy': val.speculation_accuracy,
+                                'speculation_time': val.speculation_time,
+                                'decoding_time_fn': val.decoding_time_fn_str # decoding_latency_fn_str.split("=")[1][1:-1]
+                            }
                         }
-                    }
-                else:
-                    window_parameters_file[idx] = {
-                        'window_info': window_key,
-                        'edit_parameters': {
-                            'speculation_accuracy': val.speculation_accuracy,
-                            'speculation_time': val.speculation_time,
-                            'decoding_time_fn': val.decoding_time_fn_str # decoding_latency_fn_str
+                    else:
+                        window_parameters_file[idx] = {
+                            'window_info': window_key,
+                            'edit_parameters': {
+                                'speculation_accuracy': val.speculation_accuracy,
+                                'speculation_time': val.speculation_time,
+                                'decoding_time_fn': val.decoding_time_fn_str # decoding_latency_fn_str
+                            }
                         }
-                    }
-                # print("decoding latency fn str", decoding_latency_fn_str)
-                # print("decoding latency fn str split", decoding_latency_fn_str.split("=")[1][1:-1])
-                window_metadata_file_ro.append(str(val))
+                    # print("decoding latency fn str", decoding_latency_fn_str)
+                    # print("decoding latency fn str split", decoding_latency_fn_str.split("=")[1][1:-1])
+                    window_metadata_file_ro.append(str(val))
 
-            instruction_metadata_file_ro = []
-            for idx, val in enumerate(self._device_manager.schedule_instructions):
-                instruction_metadata_file_ro.append(str(val))
+                instruction_metadata_file_ro = []
+                for idx, val in enumerate(self._device_manager.schedule_instructions):
+                    instruction_metadata_file_ro.append(str(val))
 
-            with open("window_parameters_file.json", "w", encoding="utf-8") as f:
-                json.dump(window_parameters_file, f, indent=2)
+                with open("window_parameters_file.json", "w", encoding="utf-8") as f:
+                    json.dump(window_parameters_file, f, indent=2)
 
-            with open("window_metadata_file_ro.json", "w", encoding="utf-8") as f:
-                json.dump(window_metadata_file_ro, f, indent=2)
+                with open("window_metadata_file_ro.json", "w", encoding="utf-8") as f:
+                    json.dump(window_metadata_file_ro, f, indent=2)
 
-            with open("instruction_metadata_file_ro.json", "w", encoding="utf-8") as f:
-                json.dump(instruction_metadata_file_ro, f, indent=2)
+                with open("instruction_metadata_file_ro.json", "w", encoding="utf-8") as f:
+                    json.dump(instruction_metadata_file_ro, f, indent=2)
 
         return self.get_data(), self._window_manager.all_windows, self._window_manager.window_dag
     
@@ -478,6 +516,11 @@ class DecodingSimulator:
             full_window_dag: nx.DiGraph | None = None,
             decoder_parameters: str | None = None,
             window_parameters: str | dict | None = None,
+            slow_gate: bool = False,
+            slow_gate_mult: int = None,
+            spec_strat: str = "default",
+            max_depth: int = None,
+            spec_depth_threshold: int = None,
             **simulation_params,
         ) -> None:
         # get source code of the decoding latency function
@@ -523,13 +566,13 @@ class DecodingSimulator:
 
         # create all the managers (distance here refers to code distance d)
         self.failed = False
-        self._device_manager = DeviceManager(distance, schedule, lightweight_setting=lightweight_setting, rng=rng)
+        self._device_manager = DeviceManager(distance, schedule, lightweight_setting=lightweight_setting, rng=rng, slow_gate=slow_gate, slow_gate_mult=slow_gate_mult)
         if scheduling_method == 'sliding':
-            self._window_manager = SlidingWindowManager(WindowBuilder(distance, lightweight_setting=lightweight_setting, decoder_parameters=decoder_parameters_dict, window_parameters=window_parameters_dict, schedule_insts=self._device_manager.schedule_instructions), lightweight_setting=lightweight_setting, window_parameters=window_parameters_dict)
+            self._window_manager = SlidingWindowManager(WindowBuilder(distance, lightweight_setting=lightweight_setting, decoder_parameters=decoder_parameters_dict, window_parameters=window_parameters_dict, schedule_insts=self._device_manager.schedule_instructions, speculation_accuracy=speculation_accuracy, slow_gate=slow_gate, slow_gate_mult=slow_gate_mult), lightweight_setting=lightweight_setting, window_parameters=window_parameters_dict)
         elif scheduling_method == 'parallel':
-            self._window_manager = ParallelWindowManager(WindowBuilder(distance, lightweight_setting=lightweight_setting, decoder_parameters=decoder_parameters_dict, window_parameters=window_parameters_dict, schedule_insts=self._device_manager.schedule_instructions), lightweight_setting=lightweight_setting, window_parameters=window_parameters_dict)
+            self._window_manager = ParallelWindowManager(WindowBuilder(distance, lightweight_setting=lightweight_setting, decoder_parameters=decoder_parameters_dict, window_parameters=window_parameters_dict, schedule_insts=self._device_manager.schedule_instructions, speculation_accuracy=speculation_accuracy, slow_gate=slow_gate, slow_gate_mult=slow_gate_mult), lightweight_setting=lightweight_setting)
         elif scheduling_method == 'aligned':
-            self._window_manager = TAlignedWindowManager(WindowBuilder(distance, lightweight_setting=lightweight_setting, decoder_parameters=decoder_parameters_dict, window_parameters=window_parameters_dict, schedule_insts=self._device_manager.schedule_instructions), lightweight_setting=lightweight_setting, window_parameters=window_parameters_dict)
+            self._window_manager = TAlignedWindowManager(WindowBuilder(distance, lightweight_setting=lightweight_setting, decoder_parameters=decoder_parameters_dict, schedule_insts=self._device_manager.schedule_instructions, speculation_accuracy=speculation_accuracy, slow_gate=slow_gate, slow_gate_mult=slow_gate_mult), lightweight_setting=lightweight_setting)
         else:
             raise ValueError(f"Unknown scheduling method: {scheduling_method}")
         self._decoding_manager = DecoderManager(
@@ -545,12 +588,16 @@ class DecodingSimulator:
             rng=rng,
             instructions=self._device_manager.get_instructions(),
             full_window_dag=full_window_dag,
+            spec_strat=spec_strat,
+            max_depth=max_depth,
+            spec_depth_threshold=spec_depth_threshold,
         )
 
-        # print("simulator device manager schedule insts", self._device_manager.schedule_instructions)
+        # print(self._device_manager.schedule)
 
         self.start_time = dt.datetime.now()
         self.last_print_time = dt.datetime.now() - dt.timedelta(days=1) # not quite sure why we're subtracting 1 day from it
+        print(self._device_manager.schedule)
 
     # def generate_full_window_dag(self):
     #     syndrome_rounds = self._device_manager.get_next_round(incomplete_instructions) 
@@ -596,7 +643,7 @@ class DecodingSimulator:
 
         syndrome_rounds = self._device_manager.get_next_round(incomplete_instructions) # returns another round of syndrome measurements, starting new insts if possible
         # print("incomplete instructions ", incomplete_instructions)
-        # print("syndrome rounds simulator ", syndrome_rounds)
+        # print("syndrome rounds simulator", syndrome_rounds)
         
         cur_time = dt.datetime.now()
         # print update at set interval
@@ -609,10 +656,13 @@ class DecodingSimulator:
         # process new round
         # window manager processes new round of syndrome measurements, gets new windows from this new round of measurements
         newly_constructed_windows = self._window_manager.process_round(syndrome_rounds)
-        # print("newly constructed windows simulator ", newly_constructed_windows)
+        # print("newly constructed windows simulator", newly_constructed_windows)
         # decoding manager now updates decoding with these new windows and new window dag
         self._decoding_manager.update_decoding(newly_constructed_windows, purged_indices, self._window_manager.window_dag)
 
+        
+
+        # print("current round", self._decoding_manager._current_round)
         # print("all active insts", self._device_manager._active_instructions)
         # print("all active windows", self._decoding_manager._active_window_progress)
         # print("all speculating windows", self._decoding_manager._active_speculation_progress)

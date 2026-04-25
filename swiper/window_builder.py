@@ -192,6 +192,7 @@ class DecodingWindow:
         """Get the commit regions of `other` that are touching (share a
         boundary)."""
         shared_boundaries = self.shared_spacelike_boundaries(other)
+        # print("shared boundaries", shared_boundaries)
         adjacent_regions = []
         for region in self.commit_region:
             for other_region in other.commit_region:
@@ -230,10 +231,10 @@ class DecodingWindow:
     
     # return string of all the info of this DecodingWindow
     def __repr__(self):
-        return f'Window({self.commit_region}, {self.buffer_regions}, {self.parent_instr_idx}, {self.constructed}, EDIT: {self.speculation_accuracy}, {self.speculation_time}, {self.decoding_time_fn})'
+        return f'Window({self.commit_region}, {self.buffer_regions}, {self.parent_instr_idx}, {self.constructed}, {self.window_idx}, EDIT: {self.speculation_accuracy}, {self.speculation_time}, {self.decoding_time_fn})'
 
 class WindowBuilder():
-    def __init__(self, d: int, lightweight_setting: int = 0, decoder_parameters: list[dict[str, float]] = None, window_parameters: dict | None = None, schedule_insts: list | None = None) -> None:
+    def __init__(self, d: int, lightweight_setting: int = 0, decoder_parameters: list[dict[str, float]] = None, window_parameters: dict | None = None, schedule_insts: list | None = None, speculation_accuracy: float = None, slow_gate: bool = False, slow_gate_mult: int = None) -> None:
         self._patch_groups: dict[tuple[int, int], list[int]] = {}
         self._all_rounds: list[SyndromeRound] = []
         self._waiting_rounds: set[int] = set()
@@ -247,6 +248,10 @@ class WindowBuilder():
         self.window_parameters = window_parameters
         self.schedule_insts = schedule_insts
         self.flip_flag= False
+        self.slow_gate_flag = slow_gate
+        self.slow_gate_mult = slow_gate_mult
+
+        self.speculation_accuracy = speculation_accuracy
 
     # I don't think I need to do this for cmt rgns because I've only ever seen one SR for commit region
     # But I do think I need to do this for buffer rgns because I've seen many SRs for buffer region
@@ -315,13 +320,17 @@ class WindowBuilder():
         Returns:
             List of newly-completed decoding windows.
         """
+        # print("new rounds", new_rounds)
         if not new_rounds or len(new_rounds) == 0: # if no new rounds, we set curr_round to the setting that allows us to work on windows in the backlog
             # Time to chug through that backlog
+            # print("in1")
             curr_round = -1
         else: # append new rounds to global all rounds array; update waiting rounds, remember where it started, add to either patch groups for all the round's patches, or inject_t_rounds depending on the round's instruction
+            # print("in2")
             curr_round = new_rounds[0].round # get the round number that we're on for the first thing in new_Rounds
             assert all([round.round == curr_round for round in new_rounds]) # ensure that all the rounds in new_rounds are in the same round (so they're just in a different region)
 
+            # print("in3")
             new_round_start = len(self._all_rounds) # get the index of where the new rounds begin
             self._all_rounds.extend(new_rounds) # add new rounds to all rounds
             # now all of these new rounds are considered as waiting rounds, except for rounds with the INJECT_T instruction name (only non inject_t because inject_t don't need to be decoded)
@@ -329,27 +338,35 @@ class WindowBuilder():
                                         for i,round in enumerate(new_rounds)
                                         if round.instruction.name != 'INJECT_T']) # T injection is not decoded 
             # if round instruction name is not INJECT_T, then we add this patch to patch groups, and add this inst's index to it
+            # print("in4")
             for i,round in enumerate(new_rounds):
                 if round.instruction.name != 'INJECT_T':
+                    # print("in5")
                     self._patch_groups.setdefault(round.patch, []).append(i+new_round_start)
                 else: # add to a different inject_t dict if this inst is an inject_t op
+                    # print("in6")
                     self._inject_t_rounds_dict.setdefault(round.patch, []).append(i+new_round_start) # use this dict to label other instructions' prior_t
 
         new_windows = []
 
         # get the rounds corresponding to a particular patch
         # attempt to form a commit region per patch
+        # print("patch groups", self._patch_groups)
         for patch, round_indices in list(self._patch_groups.items()):
             rounds = [self._all_rounds[round_idx] for round_idx in round_indices] # gather all (pending) rounds for this patch
+            # print("rounds in for", rounds)
             min_round = min(rounds, key=lambda x: x.round) # get the minimum round number
             max_round = max(rounds, key=lambda x: x.round) # get the maximum round number
-            duration = self.d # get the duration
+            duration = self.d
+            if self.slow_gate_flag:
+                duration = math.ceil(self.slow_gate_mult*self.d) # get the duration # 2*
             # decide how long the commit region should be
             if max_round.round != curr_round or max_round.discard_after: # if the maximum round number is not the current round number or we discard right after the max round
                 # Dangling rounds (e.g. S gate cap)
                 # aka: commit region ends right now, since the most recent round for this patch is older than the device's current round (no new round for it this cycle)
                 # if nothing for this patch arrived this cycle, or we're discarding right after, this means the commit region should end right here (cut a window ending at the latest available round)
                 duration = max_round.round - min_round.round + 1
+                # print("build windows 1")
             elif min_round.instruction.name != 'MERGE' and max_round.instruction.name == 'MERGE':
                 # Aligning windows with merges is non-negotiable due to the need for spatial buffers
                 # cut the commit region to before the merge region begins, since we want the non-merge region to be 1 window, and the merge region to be a 2nd separate window
@@ -358,6 +375,7 @@ class WindowBuilder():
                 round_indices = [round_idx for round_idx in round_indices if self._all_rounds[round_idx].round <= junk_round_end.round] # get all round indices whose rounds are less than the junk_round_end
                 rounds = [self._all_rounds[round_idx] for round_idx in round_indices] # get all rounds of these round indices
                 duration = junk_round_end.round - min_round.round + 1 # duration is the end junk round minus the min round
+                # print("build windows 2")
             elif min_round.instruction.name == 'MERGE' and max_round.instruction.name != 'MERGE': # flipped from above elif clause
                 # if we start in a merge rgn then go to a non-merge rgn, we want the merge rgn to be 1 window, and the non-merge rgn to be a 2nd separate window
                 # (start merge, latest non-merge)
@@ -365,11 +383,13 @@ class WindowBuilder():
                 round_indices = [round_idx for round_idx in round_indices if self._all_rounds[round_idx].round <= junk_round_end.round] # get all round indices whose rounds are are less than the junk round end
                 rounds = [self._all_rounds[round_idx] for round_idx in round_indices] # get all the rounds for thes round_indices
                 duration = junk_round_end.round - min_round.round + 1 # get the duration
+                # print("build windows 3")
             elif (max_round.round - min_round.round) + 1 < duration:
                 # Not enough rounds to create a window
                 # because it's less than the duration
                 # we need the commit region to be at least duration length, so if it's not, we can't create a commit region with it
                 # print("IN THIS BREAK3?")
+                # print("build windows 4")
                 continue
             # compute commit region metadata
             max_round = max(rounds, key=lambda x: x.round) # get the max round in the rounds
@@ -388,7 +408,8 @@ class WindowBuilder():
                         # print("IN THIS BREAK2?")
                         break
             # this contains the lattice surgery instructions that contributed rounds to this window
-            parent_instr_idx = frozenset([round.instruction_idx for round in rounds]) # get a set of all round's instruction indexes
+            # parent_instr_idx = frozenset([round.instruction_idx for round in rounds])
+            parent_instr_idx = frozenset([round.instruction_idx for round in rounds if round.instruction_idx != -2]) # get a set of all round's instruction indexes
             commit_region = SpacetimeRegion( # create the commit region
                 patch=patch,
                 round_start=min_round.round,
@@ -435,7 +456,7 @@ class WindowBuilder():
                 parent_instr_idx=parent_instr_idx,
                 window_idx=self._created_window_count,
                 constructed=False,
-                speculation_accuracy= random.uniform(0, 1), # 0.8 if (sorted(parent_instr_idx)[0] == -1 or not self.schedule_insts[sorted(parent_instr_idx)[0]].instruction.t_gate_bool ) else 0.5, # or self.schedule_insts[sorted(parent_instr_idx)[0]].instruction.name == "COND_S"  # random.uniform(0, 1), # 0.9, # curr_speculation_accuracy, # 0.6 # np.random.rand()
+                speculation_accuracy= self.speculation_accuracy, # random.uniform(0, 1), # 0.8 if (sorted(parent_instr_idx)[0] == -1 or not self.schedule_insts[sorted(parent_instr_idx)[0]].instruction.t_gate_bool ) else 0.5, # or self.schedule_insts[sorted(parent_instr_idx)[0]].instruction.name == "COND_S"  # random.uniform(0, 1), # 0.9, # curr_speculation_accuracy, # 0.6 # np.random.rand()
                 speculation_time=1, # curr_speculation_time,
                 decoding_time_fn= lambda _: 14,
                 decoding_time_fn_str="lambda _: 14"
@@ -454,6 +475,8 @@ class WindowBuilder():
 
         self._total_rounds_processed += len(new_rounds)
 
+        # print("new windows", new_windows)
+
         return new_windows # return new windows created in this call
 
     def flush(self):
@@ -467,7 +490,8 @@ class WindowBuilder():
             max_round = max(rounds, key=lambda x: x.round)
             duration = max_round.round - min_round.round + 1 # get the duration for the patch
             num_spatial_boundaries = 4 - sum(patch in face for face in min_round.instruction.merge_faces) # get "exposed" boundaries, which aren't part of merged faces
-            parent_instr_idx = frozenset([round.instruction_idx for round in rounds]) # get all the instruction indexes that led to these rounds for the patch
+            parent_instr_idx = frozenset([round.instruction_idx for round in rounds if round.instruction_idx != -2])
+            # parent_instr_idx = frozenset([round.instruction_idx for round in rounds]) # get all the instruction indexes that led to these rounds for the patch
             # create a commit region with the current min_round (no duration constraint like in the previous build_windows function)
             commit_region = SpacetimeRegion(
                 patch=patch,
@@ -516,7 +540,7 @@ class WindowBuilder():
                 parent_instr_idx=parent_instr_idx,
                 window_idx=self._created_window_count,
                 constructed=False,
-                speculation_accuracy= random.uniform(0, 1), # 0.8 if (sorted(parent_instr_idx)[0] == -1 or not self.schedule_insts[sorted(parent_instr_idx)[0]].instruction.t_gate_bool) else 0.5, #  or self.schedule_insts[sorted(parent_instr_idx)[0]].instruction.name == "COND_S" # random.uniform(0, 1), # 0.9, # curr_speculation_accuracy, # 0.6 # np.random.rand()
+                speculation_accuracy= self.speculation_accuracy, # random.uniform(0, 1), # 0.8 if (sorted(parent_instr_idx)[0] == -1 or not self.schedule_insts[sorted(parent_instr_idx)[0]].instruction.t_gate_bool) else 0.5, #  or self.schedule_insts[sorted(parent_instr_idx)[0]].instruction.name == "COND_S" # random.uniform(0, 1), # 0.9, # curr_speculation_accuracy, # 0.6 # np.random.rand()
                 speculation_time= 1, # curr_speculation_time,
                 decoding_time_fn= lambda _: 14,
                 decoding_time_fn_str="lambda _: 14"

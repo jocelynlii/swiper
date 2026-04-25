@@ -6,6 +6,7 @@ from mpl_toolkits.mplot3d import Axes3D
 import numpy as np
 from numpy.typing import NDArray
 import copy
+import math
 import random
 
 @dataclass
@@ -39,6 +40,7 @@ class DeviceData:
     conditioned_decode_wait_times: dict[int, int] # for each instruction index that had conditional decoding dependencies, how many rounds did it need to wait before starting to decode?
     avg_conditioned_decode_wait_time: float # avg wait time (in rounds) for all conditional insts that needed to wait for its dependencies before it could begin decoding
     num_t_gates: int # num t gates
+    avg_conditioned_decode_wait_time_individual: float
 
     def to_dict(self): # keys=field names, vals = field values
         return asdict(self)
@@ -88,7 +90,7 @@ class OrderedSet:
         return iter(self._data) # get iterator for the data list that we have here
 
 class DeviceManager:
-    def __init__(self, d_t: int, schedule: LatticeSurgerySchedule, lightweight_setting: int = 0, rng: int | np.random.Generator = np.random.default_rng()):
+    def __init__(self, d_t: int, schedule: LatticeSurgerySchedule, lightweight_setting: int = 0, rng: int | np.random.Generator = np.random.default_rng(), slow_gate: bool = False, slow_gate_mult: int = None):
         """TODO
 
         Args:
@@ -120,13 +122,22 @@ class DeviceManager:
         self._active_patches = set() # currently active patches (patches that are currently being used/actively being operated on)
 
         self._num_T_gates = int # get total number of t gates
+        self._conditioned_decode_wait_time_individual = 0 # conditioned decode wait time (not wait volume)
+        self.slow_gate_flag = slow_gate
+        self.slow_gate_mult = slow_gate_mult
+
+        # self._active_inst_gen_round_flag = dict()
 
         if isinstance(rng, int): # set the rng if needed
             rng = np.random.default_rng(rng)
         self.rng = rng
 
-        # get the true durations based on the current code distance for every single instruction in the schedule of instructions
-        self._instruction_durations: list[int] = [Duration.get_true_duration(instr.instruction.duration, self.d_t) for instr in self.schedule_instructions]
+        # get the true durations based on the current code distance for every single instruction in the schedule of instructions # 2*
+        if self.slow_gate_flag:
+            self._instruction_durations: list[int] = [Duration.get_true_duration(instr.instruction.duration, math.ceil(self.slow_gate_mult*self.d_t)) for instr in self.schedule_instructions]
+        else:
+            self._instruction_durations: list[int] = [Duration.get_true_duration(instr.instruction.duration, self.d_t) for instr in self.schedule_instructions]
+        # print("inst durations", self._instruction_durations)
         # if we get to a Y_MEAS instruction, and we're conditioned on another instruction; for 50% of the time, we don't need to fixup the instruciton, so we can simply set the fixup instruction duration to 0 (since no fixup is needed)
         # len(instr.instruction.conditioned_on_idx) > 0 means Y_MEAS effect is conditional, meaning it's part of a T-gate injection flow
         for i,instr in enumerate(self.schedule_instructions):
@@ -142,6 +153,7 @@ class DeviceManager:
         # Begin by starting the first instruction
         first_instruction_idx = self._find_first_instruction_idx() # get the index of the first instruction
         self._active_instructions[first_instruction_idx] = self._instruction_durations[first_instruction_idx] # add to the active instructions dictionary, key=first_inst_idx and val=duration of the first_inst_idx
+        # self._active_inst_gen_round_flag[first_instruction_idx] = 1
         # orders nodes in topological order (a node that another node depends on will be orderd before the other node), so first generation is nodes with 0 predecessors (which are immediately runnable). 
         # Then, immediate children of the first inst idx can could become runnable after first inst completees. Subtract the first_inst_idx, since this is already being run right now/started/is already chosen
         self._instruction_frontier = (set(next(nx.topological_generations(self.schedule_dag))) | set(self.schedule_dag.successors(first_instruction_idx))) - set([first_instruction_idx]) 
@@ -363,6 +375,7 @@ class DeviceManager:
                     assert self._instruction_durations[instruction_idx] > 0
                     self.schedule_instructions[instruction_idx].start_round = self.current_round
                     self._active_instructions[instruction_idx] = self._instruction_durations[instruction_idx]
+                    # self._active_inst_gen_round_flag[instruction_idx] = 1
                     patches_in_use.update(instruction_task.instruction.patches)
                     if instruction_task.instruction.name == 'MERGE' and instruction_task.instruction.group_name == 'CONDITIONAL_S' and self.lightweight_setting == 0:
                         assert len(instruction_task.instruction.conditioned_on_idx) > 0
@@ -384,9 +397,13 @@ class DeviceManager:
             if self.lightweight_setting < 2:
                 self._conditioned_decode_wait_times[instr_idx] = self._conditioned_decode_wait_times.get(instr_idx, 0) + 1 # keep track of/update how long an inst is waiting due to dependencies
             self._conditioned_decode_wait_time_sum += 1 # update total wait time sum too
+        
+        if len(waiting_conditional_decode_instructions) > 0:
+            self._conditioned_decode_wait_time_individual += 1
 
     def _generate_syndrome_round(self) -> tuple[list[SyndromeRound], set[int]]:
         generated_syndrome_rounds = []
+        dummy_generated_syndrome_rounds = []
 
         if self.lightweight_setting == 0:
             self._instruction_count_by_round.append(0) # update this only for lowets lightweight setting -- this array keeps track of how many instructions there are per round (and we're on round 0 rn, with 0 insts)
@@ -394,22 +411,68 @@ class DeviceManager:
         completed_instructions = set()
         # print("generate syndrome round device manager ", self._active_instructions)
         for instruction_idx in self._active_instructions.keys():
+            # self._active_inst_gen_round_flag[instruction_idx] -= 1
             instruction_task = self.schedule_instructions[instruction_idx]
-            # active_instructions: dict mapping instruction index → number of rounds remaining until that instruction finishes
-            # the parantheses stuff is what Python will raise if the asertion fails (assertion checks trivial programming bookeeping expectations)
             assert self._active_instructions[instruction_idx] > 0, (instruction_idx, self._active_instructions[instruction_idx], self.schedule_instructions[instruction_idx], self.schedule_dag.predecessors(instruction_idx), self.schedule_dag.successors(instruction_idx))
             # create a new syndrome round for all the patches in the current instruction
             generated_syndrome_rounds.extend([
                 SyndromeRound(coords, 
-                              self.current_round, 
-                              instruction_task.instruction, 
-                              instruction_idx,
-                              initialized_patch=(coords not in self._active_patches)) 
+                            self.current_round, 
+                            instruction_task.instruction, 
+                            instruction_idx,
+                            initialized_patch=(coords not in self._active_patches)) 
                 for coords in instruction_task.instruction.patches
                 ])
+            self._active_instructions[instruction_idx] -= 1 # because now we're 1 round closer to finishing this instruction
+            # self._active_inst_gen_round_flag[instruction_idx] = 1
+
+
+            # if self._active_inst_gen_round_flag[instruction_idx] <= 0:
+            #     # active_instructions: dict mapping instruction index → number of rounds remaining until that instruction finishes
+            #     # the parantheses stuff is what Python will raise if the asertion fails (assertion checks trivial programming bookeeping expectations)
+            #     assert self._active_instructions[instruction_idx] > 0, (instruction_idx, self._active_instructions[instruction_idx], self.schedule_instructions[instruction_idx], self.schedule_dag.predecessors(instruction_idx), self.schedule_dag.successors(instruction_idx))
+            #     # create a new syndrome round for all the patches in the current instruction
+            #     generated_syndrome_rounds.extend([
+            #         SyndromeRound(coords, 
+            #                     self.current_round, 
+            #                     instruction_task.instruction, 
+            #                     instruction_idx,
+            #                     initialized_patch=(coords not in self._active_patches)) 
+            #         for coords in instruction_task.instruction.patches
+            #         ])
+            #     self._active_instructions[instruction_idx] -= 1 # because now we're 1 round closer to finishing this instruction
+            #     self._active_inst_gen_round_flag[instruction_idx] = 1
+            # else:
+            #     # generated_syndrome_rounds.extend([
+            #     #     SyndromeRound(coords, 
+            #     #                 self.current_round, 
+            #     #                 instruction_task.instruction,
+            #     #                 -2,
+            #     #                 initialized_patch=(coords not in self._active_patches)) 
+            #     #     for coords in instruction_task.instruction.patches
+            #     #     ])
+            #     generated_syndrome_rounds.extend([
+            #         SyndromeRound(coords, 
+            #                     self.current_round, 
+            #                     instruction_task.instruction, 
+            #                     instruction_idx, # -2,
+            #                     initialized_patch=(coords not in self._active_patches)) 
+            #         for coords in instruction_task.instruction.patches
+            #         ])
+
+                # dummy_generated_syndrome_rounds.extend([
+                #     SyndromeRound(coords, 
+                #                 self.current_round, 
+                #                 Instruction('IDLE', -2, frozenset([coords]), 1), 
+                #                 -2,
+                #                 initialized_patch=(coords not in self._active_patches)) 
+                #     for coords in instruction_task.instruction.patches
+                #     ])
+            
+
             patches_used_this_round.update(instruction_task.instruction.patches)
             self._active_patches.update(instruction_task.instruction.patches)
-            self._active_instructions[instruction_idx] -= 1 # because now we're 1 round closer to finishing this instruction
+            # self._active_instructions[instruction_idx] -= 1 # because now we're 1 round closer to finishing this instruction
             if self.lightweight_setting == 0:
                 self._instruction_count_by_round[-1] += 1 # this inst was executed, update this bookeeping array
             if self._active_instructions[instruction_idx] == 0:
@@ -436,7 +499,8 @@ class DeviceManager:
             self._generated_syndrome_data.append(generated_syndrome_rounds)
         self._total_volume += len(generated_syndrome_rounds) # update total volume with all the new syndrome rounds generated
 
-        return generated_syndrome_rounds, completed_instructions
+        # return (generated_syndrome_rounds+dummy_generated_syndrome_rounds), completed_instructions
+        return (generated_syndrome_rounds), completed_instructions
     
     # do bookeeping for completed insts
     def _clean_completed_instructions(self, completed_instructions: set[int] = set()):
@@ -446,6 +510,7 @@ class DeviceManager:
             if self.lightweight_setting < 2:
                 self._completed_instructions.append(instruction_idx)
             self._active_instructions.pop(instruction_idx) # remove completed instructions from active instructions set
+            # self._active_inst_gen_round_flag.pop(instruction_idx)
 
     def get_next_round(self, incomplete_instructions: set[int]) -> list[SyndromeRound]:
         """Return another round of syndrome measurements, starting new
@@ -476,6 +541,8 @@ class DeviceManager:
         for dp in discarded_patches: # NOTE: there shouldb e ones yndrome round per patch per round
             syndrome_round = [sr for sr in generated_syndrome_rounds if sr.patch == dp][0] # if syndrome round is affected by this discarded patch, then we take this syndrome round bc this is the syndrome round of the discarded patch
             syndrome_round.discard_after = True # this syndrome round should be discarded right after this round (is the last round)
+
+        # print("active insts", self._active_instructions)
     
         return generated_syndrome_rounds
     
@@ -562,6 +629,7 @@ class DeviceManager:
                 conditioned_decode_wait_times=self._conditioned_decode_wait_times, # amt of time an inst has spent waiting due to its dependencies
                 avg_conditioned_decode_wait_time=self._conditioned_decode_wait_time_sum / conditional_S_count if conditional_S_count > 0 else 0, # average decode wait time (average taken based on conditional_S_count)
                 num_t_gates=num_t_gates,
+                avg_conditioned_decode_wait_time_individual=self._conditioned_decode_wait_time_individual / conditional_S_count if conditional_S_count > 0 else 0,
             )
         # same as above, just store less stuff
         elif self.lightweight_setting == 1:
@@ -580,6 +648,7 @@ class DeviceManager:
                 conditioned_decode_wait_times=self._conditioned_decode_wait_times,
                 avg_conditioned_decode_wait_time=self._conditioned_decode_wait_time_sum / conditional_S_count if conditional_S_count > 0 else 0,
                 num_t_gates=num_t_gates,
+                avg_conditioned_decode_wait_time_individual=self._conditioned_decode_wait_time_individual / conditional_S_count if conditional_S_count > 0 else 0,
             )
         # same as above, just store less stuff
         elif self.lightweight_setting == 2 or self.lightweight_setting == 3:
@@ -598,6 +667,7 @@ class DeviceManager:
                 conditioned_decode_wait_times=None,
                 avg_conditioned_decode_wait_time=self._conditioned_decode_wait_time_sum / conditional_S_count if conditional_S_count > 0 else 0,
                 num_t_gates=num_t_gates,
+                avg_conditioned_decode_wait_time_individual=self._conditioned_decode_wait_time_individual / conditional_S_count if conditional_S_count > 0 else 0,
             )
         else:
             raise ValueError('Invalid lightweight setting')

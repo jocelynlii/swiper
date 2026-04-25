@@ -50,6 +50,9 @@ class WindowManager(ABC):
         self.lightweight_setting = lightweight_setting # lightweight setting, affects how much info (simulation data) we store
         self.window_parameters = window_parameters
 
+        # added to delay construction
+        self._constructed_windows_delay: dict[int, int] = {} # key = window idx, val = how much longer (in rounds) until we can decode the window
+
     @abstractmethod
     def process_round(self, new_rounds: list[SyndromeRound]) -> list[DecodingWindow]:
         """Process new syndrome rounds and update the decoding window dependency
@@ -279,6 +282,11 @@ class WindowManager(ABC):
         # this window_idx is no longer waiting for any of its surrounding regions to be constructed
         if window_idx in self.window_construction_wait:
             self.window_construction_wait.remove(window_idx)
+
+        # self._constructed_windows_delay[window_idx] = 0 # TODO: set to whatever delay you want -- I'm just going to set to 7 for now
+        # print("delay constructed windows in mark constructed", self._constructed_windows_delay)
+        # print("window parent idx", window_idx, window.parent_instr_idx)
+
         self.all_constructed_windows.append(window_idx) # append this window idx to constructed windows list
         self._window_construction_times[window_idx] = self.current_round # append the current round as this window's construction time to the list
         new_window = DecodingWindow( # create new window with this window's same metadata, except now constructed=True
@@ -378,6 +386,7 @@ class WindowManager(ABC):
             for cr_idx in range(len(window.commit_region)): # check all of this window's commit regions (each one is a SpacetimeRegion)
                 num_commit_neighbors, num_incoming_other_buffers, num_outgoing_buffers, num_terminations = self.count_covered_faces(window_idx, cr_idx) # get the number of covered faces for this commit rgn and window
                 total = num_commit_neighbors + num_incoming_other_buffers + num_outgoing_buffers + num_terminations # total number of covered faces/faces that this window borders
+                # print("total", total, num_commit_neighbors, num_incoming_other_buffers, num_outgoing_buffers, num_terminations)
                 # checks that all of the faces of this cmt rgn either touches another cmt rgn, has an outgoing buffer, incoming buffer, or is init/discard/spatial boundary. 
                 # total=6 means that this is satisfied. total=# faces that satisfy this
                 if total < 6: 
@@ -390,11 +399,13 @@ class WindowManager(ABC):
                 assert total == 6 # total shld be 6
             if ready_to_construct: # if ready to construct, add to surrounded windows
                 surrounded_windows.add(window_idx)
-
+            
+        # original
         for window_idx in surrounded_windows: # for windows in surrounded_windows, mark them as constructed
             self._mark_constructed(window_idx)
 
     def _flush_windows(self) -> None:
+        # print("in flush windows")
         # No new rounds; flush any dangling windows
         unconstructed_windows = list(self.window_construction_wait) # get all unconstructed windows who are waiting for their surrounding windows to be constructed
         for window_idx in unconstructed_windows:
@@ -457,14 +468,23 @@ class WindowManager(ABC):
 class SlidingWindowManager(WindowManager):
     def process_round(self, new_rounds: list[SyndromeRound]) -> list[DecodingWindow]:
         constructed_window_count = len(self.all_constructed_windows) # get num of constructed windows
+        new_rounds_copy = new_rounds.copy()
+        new_rounds_dummy = new_rounds.copy()
+        new_rounds_dummy[:] = [r for r in new_rounds if r.instruction_idx == -2]
+        new_rounds[:] = [r for r in new_rounds if r.instruction_idx != -2]
+        # print("new_rounds", new_rounds)
+        # print("new rounds dummy", new_rounds_dummy)
+        # print("og new rounds", new_rounds_copy)
 
         # if we have new rounds, build the windows/update the existing windows for those new rounds
-        if new_rounds:
-            new_commits = self.window_builder.build_windows(new_rounds)
+        # if new_rounds:
+        if new_rounds_copy:
+            # new_commits = self.window_builder.build_windows(new_rounds)
+            new_commits = self.window_builder.build_windows(new_rounds_copy)
         else: # if no new rounds, flush remaining rounds into windows
             new_commits = self.window_builder.flush()
 
-        # print(new_commits)
+        # print("new commits", new_commits)
 
         # print("all constructed windows1 ", self.all_constructed_windows)
         
@@ -533,9 +553,18 @@ class SlidingWindowManager(WindowManager):
         self._update_waiting_windows() # might need to mark as constructed some previously dangling windows bc we just updated windows
         # print("all constructed windows5 ", self.all_constructed_windows)
 
-        if not new_rounds: # flush windows if no new rounds # flush dangling windows (mark dangling windows as constructed, if no new rounds)
+        if not new_rounds and not new_rounds_dummy: # flush windows if no new rounds # flush dangling windows (mark dangling windows as constructed, if no new rounds)
             self._flush_windows()
-        # print("all constructed windows6 ", self.all_constructed_windows)
+
+        # TODO added
+        # for window_idx in list(self._constructed_windows_delay):
+        #     self._constructed_windows_delay[window_idx] -= 1
+        #     if self._constructed_windows_delay[window_idx] <= 0:
+        #         del self._constructed_windows_delay[window_idx]
+        #         self.all_constructed_windows.append(window_idx)
+
+        # print("all constructed windows", self.all_constructed_windows)
+        # print("delay constructed windows", self._constructed_windows_delay)
 
         # update constructed windows with our new windows (start iterating thru all_constructed_windows from the index where our new windows start)
         constructed_windows = [self._get_window(window_idx) for window_idx in self.all_constructed_windows[constructed_window_count:]]

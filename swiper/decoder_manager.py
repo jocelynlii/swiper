@@ -6,6 +6,7 @@ import itertools
 from swiper.window_builder import DecodingWindow
 from swiper.lattice_surgery_schedule import Instruction, Duration
 from collections import defaultdict, deque
+import time
 
 @dataclass
 class DecoderData:
@@ -32,6 +33,12 @@ class DecoderData:
     per_window_parent_inst: list[frozenset[int]]
     per_window_spec_acc: dict
     per_inst_windows: dict
+    average_speculation_depth: float
+    total_backlog: int
+    average_backlog: float
+    processor_idle_rounds: int
+    processor_idle_percent: float
+    average_active_windows: float
 
     def to_dict(self):
         return asdict(self)
@@ -60,11 +67,14 @@ class DecoderManager:
             max_parallel_processes: int | None = None,
             speculation_mode: str | None = 'integrated', # TODO so if integrated, when can we start speculating? is this saying that the decoder starts "processing" a window when it starts speculating? bc speculation should come before the decoder, right?
             poison_policy: str = 'successors',
-            missed_speculation_modifier: float = 1.4,
+            missed_speculation_modifier: float = 1.4, # 5.0, 
             lightweight_setting: int = 0, # how much data to return
             rng: int | np.random.Generator = np.random.default_rng(),
             instructions: list[Instruction] = None, # ADDED because want this list in decoder manager too for identifying t-gate instructions
             full_window_dag: nx.DiGraph | None = None, # ADDED -- full window dag used for finding dist to t-gate
+            spec_strat: str = "default",
+            max_depth: int = None,
+            spec_depth_threshold: int = None,
         ) -> None:
         """Initialize the decoder manager.
         
@@ -140,17 +150,30 @@ class DecoderManager:
         self._num_discarded_decodes: int = 0 # num of decoding procs that had to be restarted bc of misprediction
         self._wasted_decode_volume: int = 0 # wasted decoding volume (sum of # rounds for each decoder that were wasted due to misprediction)
         self._num_successful_speculations: int = 0
+        self._speculation_depth: int = 0
+        self._num_speculation_depths: int = 0
 
         self._unwanted_idle_rounds: int = 0 # number of unwanted idle rounds ADDED
+        self._unwanted_idle_rounds_any: int = 0
+        self._unwanted_idle_rounds_volume: int = 0
+
+        self.total_spec_depth_calc_time: float = 0.0
+        self.spec_depth_threshold = spec_depth_threshold
 
         self._window_idx_dag = nx.DiGraph() # dag representing dependencies between decoding windows, not insts
         self._instructions = instructions
+        self._processors_idle_rounds = 0
+        self._total_active_windows = 0
         # for inst in instructions:
         #     print(inst)
 
         self.full_window_dag = full_window_dag
         self._per_window_poisoned: list[int] = []
         self._per_window_wasted_rounds: list[int] = []
+        self._spec_strat = spec_strat
+        self.max_depth =max_depth
+
+        self._total_backlog = 0
 
     def get_dist_to_t_gate(self, task_idx):
         if self.full_window_dag is not None:
@@ -275,12 +298,17 @@ class DecoderManager:
                             # update speculation modifiers (adjacent faces have
                             # higher failure rate)
                             poisoned_source_crs = successor.window.get_touching_commit_regions(task.window) # now that we know successor has been poisoned, get all of successor's commit regions that touch our curr tasks's commit regions. these are all the poisoned commit regions
+                            # print("0in missed speculation modifier")
                             for other_successor_idx in self._window_idx_dag.successors(successor_idx): # iterate through all successors of this successor in the window dag
+                                # print("1in missed speculation modifier")
                                 other_successor = self._get_task_or_none(other_successor_idx) # get the task of this other successor
                                 if other_successor:
+                                    # print("2in missed speculation modifier", other_successor)
                                     for other_cr in successor.window.get_touching_commit_regions(other_successor.window): 
+                                        # print("3in missed speculation modifier")
                                         # if this other successor's commit region is touching our curr successor's commit region (which has been poisoned), we know that we need to modify the speculation accuracy of this other succ's commit rgn
                                         if any(cr.shares_edge(other_cr) for cr in poisoned_source_crs): # if shares a border with any of the poisoned commit regions
+                                            # print("4in missed speculation modifier")
                                             successor.speculation_modifiers[other_successor_idx] = successor.speculation_modifiers.get(other_successor_idx, 1.0) * self.missed_speculation_modifier # multiply by missed speculation modifier (multiply existing missed speculation modifier if alr exists (from other missed speculation))
                                             # TODO: edge case where single
                                             # window has multiple adjacent
@@ -361,13 +389,27 @@ class DecoderManager:
         self._current_round += 1
         # update num rounds where have only useless unwanted idle windows
         only_unwanted_idle = True
+        have_one_unwanted_idle = False
         for window in self._active_window_progress.keys():
             for parent_inst in self._tasks_by_idx[window].window.parent_instr_idx:
-                if parent_inst != -1:
+                if parent_inst != -1 and only_unwanted_idle:
                     only_unwanted_idle = False
-                    break
-            if not only_unwanted_idle:
-                break
+                    # break
+
+                if parent_inst == -1 and not have_one_unwanted_idle:
+                    self._unwanted_idle_rounds_any += 1
+                    have_one_unwanted_idle = True
+                    # break
+
+                if parent_inst == -1:
+                    self._unwanted_idle_rounds_volume += 1
+
+            # if not only_unwanted_idle:
+            #     break
+
+            # if have_one_unwanted_idle:
+            #     break
+            
         if only_unwanted_idle:
             self._unwanted_idle_rounds += 1
             
@@ -576,57 +618,95 @@ class DecoderManager:
 
             frontier = next_frontier
         
-    def get_speculation_depth(self, task_idx, next_tasks_to_decode, max_depth = None) -> int:
+    def get_speculation_depth(self, task_idx, next_tasks_to_decode, max_depth = None, spec_strat = None, filtered_decode_tasks_count = None) -> int:
         task = self._get_task(task_idx)
 
-        if task_idx in self._pending_decode_tasks:
-            parents = list(self._window_idx_dag.predecessors(task.window_idx))
+        # filtered_pending_decode_tasks = [ti for ti in self._pending_decode_tasks if nx.ancestors(self._window_idx_dag, ti).isdisjoint(self._pending_decode_tasks)] 
 
-            # no dependencies (regardless of speculated or not) passed to me yet, so I'm not even ready to decode yet even with speculated deps
-            if any(not (self._completed_decoding(parent_idx) or self._completed_speculation(parent_idx)) for parent_idx in parents): 
-                return
-            
-            depth = self.first_distance_where_all_flagged(task_idx, max_depth)
-            if depth != -2:
-            # if depth:
-                next_tasks_to_decode[depth].append(task_idx)
-            # else:
-            #     print("NONE VERIFIED")
+        if spec_strat is not None and (spec_strat == "deep_with_preds" or spec_strat == "shallow_with_preds"):
+            # if task_idx in filtered_pending_decode_tasks:
+            if task_idx in self._pending_decode_tasks:
+                parents = list(self._window_idx_dag.predecessors(task.window_idx))
 
-            # if all(self._is_verified_task(parent_idx) for parent_idx in parents):
-            #     next_tasks_to_decode[depth].append(task_idx)
-            #     return
-            # else:
-            #     parent_done = True
-            #     for parent_idx in parents:
-            #         parent_task = self._get_task(parent_idx)
-            #         parents_parents = list(self._window_idx_dag.predecessors(parent_task.window_idx))
+                # no dependencies (regardless of speculated or not) passed to me yet, so I'm not even ready to decode yet even with speculated deps
+                if any(not (self._completed_decoding(parent_idx) or self._completed_speculation(parent_idx)) for parent_idx in parents): 
+                    return filtered_decode_tasks_count
+                
+                start = time.perf_counter()
+                depth = self.first_distance_where_all_flagged(task_idx, max_depth)
+                end = time.perf_counter()
+                self.total_spec_depth_calc_time += (end-start)
+                if depth != -2:
+                    print("depth:", depth, "task idx:", task_idx, "filtered task count:", filtered_decode_tasks_count)
+                    filtered_decode_tasks_count+=1
+                # if depth:
+                    next_tasks_to_decode[depth].append(task_idx)
+                    self._speculation_depth += depth
+                    self._num_speculation_depths += 1
+        else:
+            if task_idx in self._pending_decode_tasks:
+            # if task_idx in filtered_pending_decode_tasks:
+                parents = list(self._window_idx_dag.predecessors(task.window_idx))
 
-            #         if not all(self._is_verified_task(parent_idx) for parent_idx in parents_parents):
-            #             parent_done = False
-            #             break
+                # no dependencies (regardless of speculated or not) passed to me yet, so I'm not even ready to decode yet even with speculated deps
+                if any(not (self._completed_decoding(parent_idx) or self._completed_speculation(parent_idx)) for parent_idx in parents): 
+                    return filtered_decode_tasks_count
+                
+                start = time.perf_counter()
+                depth = self.first_distance_where_all_flagged(task_idx, max_depth)
+                end = time.perf_counter()
+                self.total_spec_depth_calc_time += (end-start)
+                if depth != -2:
+                    filtered_decode_tasks_count+=1
+                # if depth:
+                    next_tasks_to_decode[depth].append(task_idx)
+                    self._speculation_depth += depth
+                    self._num_speculation_depths += 1
 
-            #     if parent_done:
-            #         next_tasks_to_decode[1].append(task_idx)
-            #     else: # added only below
-            #         parent_parent_done = True
-            #         for parent_idx in parents:
-            #             parent_task = self._get_task(parent_idx)
-            #             parents_parents = list(self._window_idx_dag.predecessors(parent_task.window_idx))
+        # if (filtered_decode_tasks_count < len(self._pending_decode_tasks)):
+        #     print("filtered task count below:", filtered_decode_tasks_count)
+        # else:
+        #     print("filtered task count surpassed:", filtered_decode_tasks_count)
+        # print("next tasks to decode", next_tasks_to_decode)
 
-            #             for parent_parent_idx in parents_parents:
-            #                 parent_parent_task = self._get_task(parent_parent_idx)
-            #                 parents_parents_parents = list(self._window_idx_dag.predecessors(parent_parent_task.window_idx))
+        return filtered_decode_tasks_count
+                # else:
+                #     print("NONE VERIFIED")
 
-            #                 if not all(self._is_verified_task(parent_idx) for parent_idx in parents_parents_parents):
-            #                     parent_parent_done = False
-            #                     break
+                # if all(self._is_verified_task(parent_idx) for parent_idx in parents):
+                #     next_tasks_to_decode[depth].append(task_idx)
+                #     return
+                # else:
+                #     parent_done = True
+                #     for parent_idx in parents:
+                #         parent_task = self._get_task(parent_idx)
+                #         parents_parents = list(self._window_idx_dag.predecessors(parent_task.window_idx))
 
-            #             if not parent_parent_done:
-            #                 break
+                #         if not all(self._is_verified_task(parent_idx) for parent_idx in parents_parents):
+                #             parent_done = False
+                #             break
 
-            #         if parent_parent_done:
-            #             next_tasks_to_decode[2].append(task_idx)
+                #     if parent_done:
+                #         next_tasks_to_decode[1].append(task_idx)
+                #     else: # added only below
+                #         parent_parent_done = True
+                #         for parent_idx in parents:
+                #             parent_task = self._get_task(parent_idx)
+                #             parents_parents = list(self._window_idx_dag.predecessors(parent_task.window_idx))
+
+                #             for parent_parent_idx in parents_parents:
+                #                 parent_parent_task = self._get_task(parent_parent_idx)
+                #                 parents_parents_parents = list(self._window_idx_dag.predecessors(parent_parent_task.window_idx))
+
+                #                 if not all(self._is_verified_task(parent_idx) for parent_idx in parents_parents_parents):
+                #                     parent_parent_done = False
+                #                     break
+
+                #             if not parent_parent_done:
+                #                 break
+
+                #         if parent_parent_done:
+                #             next_tasks_to_decode[2].append(task_idx)
 
 
     def update_decoding(self, new_windows: list[DecodingWindow], purged_indices: list[int], window_idx_dag: nx.DiGraph) -> None:
@@ -817,13 +897,15 @@ class DecoderManager:
         #         print(next_tasks)
 
         # self._is_verified_task(task_idx)
-        # THIS ONE BELOW IS THE ONE -- after checking with verified tasks, this is the one that follows the expected pattern!!!   
+        # THIS ONE BELOW IS THE ONE -- after checking with verified tasks, this is the one that follows the expected pattern!!!  
+        # -------------------------- ------------------------- ------------------------- ------------------------- ------------------------- ------------------------- 
         if self.max_parallel_processes:
+            filtered_decode_tasks_count = 0
             for task_idx in unprocessed_task_indices:
                 # if task_idx in self._active_window_progress:
                 #     continue
 
-                self.get_speculation_depth(task_idx, next_tasks_to_decode)
+                filtered_decode_tasks_count = self.get_speculation_depth(task_idx, next_tasks_to_decode, max_depth=self.max_depth, spec_strat=self._spec_strat, filtered_decode_tasks_count=filtered_decode_tasks_count)
 
                 # task = self._get_task(task_idx)
 
@@ -870,18 +952,83 @@ class DecoderManager:
                 #             if parent_parent_done:
                 #                 next_tasks_to_decode[2].append(task_idx)
 
+            filtered_pending_decode_tasks = [ti for ti in self._pending_decode_tasks if nx.ancestors(self._window_idx_dag, ti).isdisjoint(self._pending_decode_tasks)] 
             if next_tasks_to_decode:
-                for dist in sorted(next_tasks_to_decode): # , reverse=True
-                    val = next_tasks_to_decode[dist]
-                    for task in val:
-                        next_tasks.append(task)
+                if self._spec_strat == "shallow":
+                    for dist in sorted(next_tasks_to_decode): # , reverse=True
+                        val = next_tasks_to_decode[dist]
+                        for task in val:
+                            next_tasks.append(task)
 
+                            if len(next_tasks) >= self.max_parallel_processes - len(self._active_window_progress):
+                                break
+                        
                         if len(next_tasks) >= self.max_parallel_processes - len(self._active_window_progress):
                             break
-                    
-                    if len(next_tasks) >= self.max_parallel_processes - len(self._active_window_progress):
-                        break
-                print(next_tasks_to_decode)
+                elif self._spec_strat == "shallow_with_preds":
+                    for dist in sorted(next_tasks_to_decode): # , reverse=True
+                        val = next_tasks_to_decode[dist]
+                        for task in val:
+                            if task in filtered_pending_decode_tasks:
+                                next_tasks.append(task)
+
+                                if len(next_tasks) >= self.max_parallel_processes - len(self._active_window_progress):
+                                    break
+                        
+                        if len(next_tasks) >= self.max_parallel_processes - len(self._active_window_progress):
+                            break
+
+                    # if still don't have long enough next_tasks, fill with non verifying decoder tasks
+                    if len(next_tasks) < self.max_parallel_processes - len(self._active_window_progress):
+                        for dist in sorted(next_tasks_to_decode): # , reverse=True
+                            val = next_tasks_to_decode[dist]
+                            for task in val:
+                                if task not in filtered_pending_decode_tasks:
+                                    next_tasks.append(task)
+
+                                    if len(next_tasks) >= self.max_parallel_processes - len(self._active_window_progress):
+                                        break
+                            
+                            if len(next_tasks) >= self.max_parallel_processes - len(self._active_window_progress):
+                                break
+                elif self._spec_strat == "deep":
+                    for dist in sorted(next_tasks_to_decode, reverse=True): # , reverse=True
+                        val = next_tasks_to_decode[dist]
+                        for task in val:
+                            next_tasks.append(task)
+
+                            if len(next_tasks) >= self.max_parallel_processes - len(self._active_window_progress):
+                                break
+                        
+                        if len(next_tasks) >= self.max_parallel_processes - len(self._active_window_progress):
+                            break
+                elif self._spec_strat == "deep_with_preds":
+                    for dist in sorted(next_tasks_to_decode, reverse=True): # , reverse=True
+                        val = next_tasks_to_decode[dist]
+                        for task in val:
+                            if task in filtered_pending_decode_tasks:
+                                next_tasks.append(task)
+
+                                if len(next_tasks) >= self.max_parallel_processes - len(self._active_window_progress):
+                                    break
+                        
+                        if len(next_tasks) >= self.max_parallel_processes - len(self._active_window_progress):
+                            break
+
+                    if len(next_tasks) < self.max_parallel_processes - len(self._active_window_progress):
+                        for dist in sorted(next_tasks_to_decode, reverse=True): # , reverse=True
+                            val = next_tasks_to_decode[dist]
+                            for task in val:
+                                if task not in filtered_pending_decode_tasks:
+                                    next_tasks.append(task)
+
+                                    if len(next_tasks) >= self.max_parallel_processes - len(self._active_window_progress):
+                                        break
+                            
+                            if len(next_tasks) >= self.max_parallel_processes - len(self._active_window_progress):
+                                break
+                # print(next_tasks_to_decode)
+        # ------------------------- ------------------------- ------------------------- ------------------------- ------------------------- 
             
 
         # # TODO ADDED: initially iterate through unprocessed_task_indices and get the most parallel ones to launch based on max parallel processes
@@ -968,7 +1115,7 @@ class DecoderManager:
             
             # if the task index is in the pending decode tasks array
             # print("pending decode tasks ", self._pending_decode_tasks)
-            if self.max_parallel_processes:
+            if self.max_parallel_processes and self._spec_strat != "default" and self.spec_depth_threshold is None:
                 if task_idx in self._pending_decode_tasks: #  and task_idx in next_tasks_to_decode
                     # TODO technically we would need to first calculate how many next tasks we have then if we don't have enough
                     # we would want to grab from the front instead of us grabbing from the back in case the back doesn't have 
@@ -993,13 +1140,64 @@ class DecoderManager:
                     assert not self._completed_decoding(task_idx) and task_idx not in self._active_window_progress # assert this window has not started decoding yet and has not completed
                     self._pending_decode_tasks.remove(task_idx)
                     task.decoding_start_time = self._current_round
-                    x = task.window.decoding_time_fn(task.window.total_spacetime_volume()) # self.decoding_time_function(task.window.total_spacetime_volume()) 
+                    x = self.decoding_time_function(task.window.total_spacetime_volume()) # task.window.decoding_time_fn(task.window.total_spacetime_volume()) # 
                     if len(self._per_window_wasted_rounds) <= task.window_idx:
                         self._per_window_wasted_rounds += [0] * (task.window_idx-len(self._per_window_wasted_rounds)+1)
                     if len(self._per_window_poisoned) <= task.window_idx:
                         self._per_window_poisoned += [0] * (task.window_idx-len(self._per_window_poisoned)+1)
                     # print("decoding time fcn result ", x)
-                    print(task_idx)
+                    # print(task_idx)
+                    self._active_window_progress[task_idx] = x # self.decoding_time_function(task.window.total_spacetime_volume()) # set the remaining decoding time for this task (which rn, is the total decoding time for this window)
+                    task.used_parent_speculations = {}
+                    for parent_idx in parents: # check for each parent, whether we're using their speculated result or their actual verified result
+                        parent = self._get_task(parent_idx)
+                        if parent.completed_decoding:
+                            task.used_parent_speculations[parent_idx] = False
+                        else:
+                            assert parent.completed_speculation
+                            task.used_parent_speculations[parent_idx] = True
+                    # if we're in integrated mode for speculation, we want to begin the speculation WITH the decoding (unlike separate mode, whose speculation was started above)
+                    if self.speculation_mode == 'integrated' and task_idx in self._pending_speculate_tasks: # if our task is in the pending speculation tasks
+                        # begin a speculation along with decoding
+                        assert task_idx not in self._active_speculation_progress # has not started speculating
+                        self._pending_speculate_tasks.remove(task_idx)
+                        task.speculation_start_time = self._current_round
+                        # handle speculation time
+                        if task.window.speculation_time > 0: # if self.speculation_time > 0:
+                            self._active_speculation_progress[task_idx] = task.window.speculation_time # self.speculation_time
+                        else:
+                            self._get_task(task_idx).completed_speculation = True
+                            # add to unprocessed (but rdy to start processing) task indices all of this window's successors (which depended on this window), if these successors have a task and have not completed decoding
+                            # TODO what if these windows have multiple dependencies
+                            unprocessed_task_indices |= {w_idx for w_idx in self._window_idx_dag.successors(task.window_idx) if not (self._get_task_or_none(w_idx) is None or self._get_task(w_idx).completed_decoding)}
+            elif self.max_parallel_processes and self._spec_strat != "default" and self.spec_depth_threshold is not None:
+                if task_idx in self._pending_decode_tasks: #  and task_idx in next_tasks_to_decode
+                    # TODO technically we would need to first calculate how many next tasks we have then if we don't have enough
+                    # we would want to grab from the front instead of us grabbing from the back in case the back doesn't have 
+                    # enough tasks to fill our load
+                    if task_idx not in next_tasks:
+                        continue
+                    else:
+                        next_tasks.remove(task_idx)
+                        
+                    # window has not been processed yet
+                    parents = list(self._window_idx_dag.predecessors(task.window_idx)) # get parent windows
+                    # print("parents pending decoding ", parents)
+                    # if any of the parents have not completed decoding or completed speculation, then we can't decode yet, since we haven't received our (actual or predicted) dependency bits
+                    if any(not (self._completed_decoding(parent_idx) or self._completed_speculation(parent_idx)) for parent_idx in parents): 
+                        # print("IN THIS BREAK4")
+                        continue
+                    # begin decoding
+                    assert not self._completed_decoding(task_idx) and task_idx not in self._active_window_progress # assert this window has not started decoding yet and has not completed
+                    self._pending_decode_tasks.remove(task_idx)
+                    task.decoding_start_time = self._current_round
+                    x = self.decoding_time_function(task.window.total_spacetime_volume()) # task.window.decoding_time_fn(task.window.total_spacetime_volume()) # 
+                    if len(self._per_window_wasted_rounds) <= task.window_idx:
+                        self._per_window_wasted_rounds += [0] * (task.window_idx-len(self._per_window_wasted_rounds)+1)
+                    if len(self._per_window_poisoned) <= task.window_idx:
+                        self._per_window_poisoned += [0] * (task.window_idx-len(self._per_window_poisoned)+1)
+                    # print("decoding time fcn result ", x)
+                    # print(task_idx)
                     self._active_window_progress[task_idx] = x # self.decoding_time_function(task.window.total_spacetime_volume()) # set the remaining decoding time for this task (which rn, is the total decoding time for this window)
                     task.used_parent_speculations = {}
                     for parent_idx in parents: # check for each parent, whether we're using their speculated result or their actual verified result
@@ -1036,7 +1234,7 @@ class DecoderManager:
                     assert not self._completed_decoding(task_idx) and task_idx not in self._active_window_progress # assert this window has not started decoding yet and has not completed
                     self._pending_decode_tasks.remove(task_idx)
                     task.decoding_start_time = self._current_round
-                    x = task.window.decoding_time_fn(task.window.total_spacetime_volume()) # self.decoding_time_function(task.window.total_spacetime_volume()) 
+                    x = self.decoding_time_function(task.window.total_spacetime_volume()) # task.window.decoding_time_fn(task.window.total_spacetime_volume())
                     if len(self._per_window_wasted_rounds) <= task.window_idx:
                         self._per_window_wasted_rounds += [0] * (task.window_idx-len(self._per_window_wasted_rounds)+1)
                     if len(self._per_window_poisoned) <= task.window_idx:
@@ -1066,7 +1264,14 @@ class DecoderManager:
                             # add to unprocessed (but rdy to start processing) task indices all of this window's successors (which depended on this window), if these successors have a task and have not completed decoding
                             # TODO what if these windows have multiple dependencies
                             unprocessed_task_indices |= {w_idx for w_idx in self._window_idx_dag.successors(task.window_idx) if not (self._get_task_or_none(w_idx) is None or self._get_task(w_idx).completed_decoding)}
-        print(self._active_window_progress)
+        # print("round", self._current_round)
+        # print("active windows", self._active_window_progress)
+        # print("pending decodes", self._pending_decode_tasks)
+        # print(self._active_speculation_progress)
+        self._total_backlog += len(self._pending_decode_tasks)
+        self._total_active_windows += len(self._active_window_progress)
+        if len(self._active_window_progress) == 0:
+            self._processors_idle_rounds += 1
 
 
     # check if a task is done completed decoding or not
@@ -1143,6 +1348,12 @@ class DecoderManager:
                 per_window_parent_inst={task_idx:task.window.parent_instr_idx for task_idx,task in enumerate(self._tasks_by_idx) if task},
                 per_window_spec_acc={task_idx:round(task.window.speculation_accuracy, 2) for task_idx,task in enumerate(self._tasks_by_idx) if task},
                 per_inst_windows=per_parent_inst,
+                average_speculation_depth=self._speculation_depth / self._num_speculation_depths if self._num_speculation_depths != 0 else 0,
+                total_backlog=self._total_backlog,
+                average_backlog=self._total_backlog/self._current_round,
+                processor_idle_rounds=self._processors_idle_rounds,
+                processor_idle_percent=self._processors_idle_rounds/self._current_round,
+                average_active_windows=self._total_active_windows/self._current_round,
             )
         elif self.lightweight_setting == 1: # return less
             return DecoderData(
@@ -1169,6 +1380,12 @@ class DecoderManager:
                 per_window_parent_inst={task_idx:task.window.parent_instr_idx for task_idx,task in enumerate(self._tasks_by_idx) if task},
                 per_window_spec_acc={task_idx:round(task.window.speculation_accuracy, 2) for task_idx,task in enumerate(self._tasks_by_idx) if task},
                 per_inst_windows=per_parent_inst,
+                average_speculation_depth=self._speculation_depth / self._num_speculation_depths if self._num_speculation_depths != 0 else 0,
+                total_backlog=self._total_backlog,
+                average_backlog=self._total_backlog/self._current_round,
+                processor_idle_rounds=self._processors_idle_rounds,
+                processor_idle_percent=self._processors_idle_rounds/self._current_round,
+                average_active_windows=self._total_active_windows/self._current_round,
             )
         elif self.lightweight_setting == 2 or self.lightweight_setting == 3: # return even less
             return DecoderData(
@@ -1195,6 +1412,12 @@ class DecoderManager:
                 per_window_parent_inst={task_idx:task.window.parent_instr_idx for task_idx,task in enumerate(self._tasks_by_idx) if task},
                 per_window_spec_acc={task_idx:round(task.window.speculation_accuracy, 2) for task_idx,task in enumerate(self._tasks_by_idx) if task},
                 per_inst_windows=per_parent_inst,
+                average_speculation_depth=self._speculation_depth / self._num_speculation_depths if self._num_speculation_depths != 0 else 0,
+                total_backlog=self._total_backlog,
+                average_backlog=self._total_backlog/self._current_round,
+                processor_idle_rounds=self._processors_idle_rounds,
+                processor_idle_percent=self._processors_idle_rounds/self._current_round,
+                average_active_windows=self._total_active_windows/self._current_round,
             )
         else:
             raise RuntimeError('Invalid lightweight setting')

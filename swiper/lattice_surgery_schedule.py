@@ -78,8 +78,11 @@ class Instruction:
             t_gate_bool=self.t_gate_bool,
         )
     
-    def __str__(self): # str(list(x).replace(" ","")) makes a string of a list that looks like: [1,2,3]
-        return f'{self.name} {self.idx} {str(list(self.patches)).replace(" ", "")} {self.duration} {str(list(self.conditioned_on_idx)).replace(" ", "")} {str(list(self.conditional_dependencies)).replace(" ", "")} {str(list(self.conditioned_on_completion_idx)).replace(" ", "")} {str(list(self.conditional_completion_dependencies)).replace(" ", "")} {str(list(self.merge_faces)).replace(" ", "")} {str(list(self.group_instr_indices)).replace(" ", "")} {self.group_name if self.group_name else "none"} {self.t_gate_bool} {self.actual_duration_time if self.actual_duration_time else "none"}'
+    # def __str__(self): # str(list(x).replace(" ","")) makes a string of a list that looks like: [1,2,3]
+    #     return f'{self.name} {self.idx} {str(list(self.patches)).replace(" ", "")} {self.duration} {str(list(self.conditioned_on_idx)).replace(" ", "")} {str(list(self.conditional_dependencies)).replace(" ", "")} {str(list(self.conditioned_on_completion_idx)).replace(" ", "")} {str(list(self.conditional_completion_dependencies)).replace(" ", "")} {str(list(self.merge_faces)).replace(" ", "")} {str(list(self.group_instr_indices)).replace(" ", "")} {self.group_name if self.group_name else "none"} {self.t_gate_bool} {self.actual_duration_time if self.actual_duration_time else "none"}'
+    
+    def __str__(self):
+        return f'{self.name} {str(list(self.patches)).replace(" ", "")}' # {str(list(self.conditioned_on_idx)).replace(" ", "")}
 
     # convert from string to an actual Instruction. string is in format shown above from def __str__ method
     @classmethod
